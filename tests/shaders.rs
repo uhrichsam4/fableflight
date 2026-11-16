@@ -53,3 +53,48 @@ fn shaders_validate() {
     // plane.wgsl takes the 747 deck's string table: checked in b747::deck's tests.
     assert!(ok, "shader errors above");
 }
+
+#[path = "../src/fsr/spirv.rs"]
+mod fsr_spirv;
+
+/// The vendored FSR 3 SPIR-V (src/fsr), patched as the renderer loads it,
+/// goes through naga and on to Metal Shading Language.
+#[test]
+fn fsr_spirv_validates() {
+    let mut ok = true;
+    for (name, spv, spd) in [
+        ("accumulate", &include_bytes!("../src/fsr/spv/accumulate_pass.spv")[..], false),
+        ("accumulate_sharpen", include_bytes!("../src/fsr/spv/accumulate_sharpen_pass.spv"), false),
+        ("luma_instability", include_bytes!("../src/fsr/spv/luma_instability_pass.spv"), false),
+        ("luma_pyramid", include_bytes!("../src/fsr/spv/luma_pyramid_pass.spv"), true),
+        ("prepare_inputs", include_bytes!("../src/fsr/spv/prepare_inputs_pass.spv"), false),
+        ("prepare_reactivity", include_bytes!("../src/fsr/spv/prepare_reactivity_pass.spv"), false),
+        ("rcas", include_bytes!("../src/fsr/spv/rcas_pass.spv"), false),
+        ("shading_change", include_bytes!("../src/fsr/spv/shading_change_pass.spv"), false),
+        ("shading_change_pyramid", include_bytes!("../src/fsr/spv/shading_change_pyramid_pass.spv"), true),
+    ] {
+        let words = fsr_spirv::patch(spv, spd);
+        let m = match naga::front::spv::parse_u8_slice(bytemuck::cast_slice(&words), &Default::default()) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("--- fsr {name}: {e}");
+                ok = false;
+                continue;
+            }
+        };
+        let info = match naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m) {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!("--- fsr {name}: {e:?}");
+                ok = false;
+                continue;
+            }
+        };
+        let opts = naga::back::msl::Options { lang_version: (2, 1), fake_missing_bindings: true, ..Default::default() };
+        if let Err(e) = naga::back::msl::write_string(&m, &info, &opts, &naga::back::msl::PipelineOptions::default()) {
+            eprintln!("--- fsr {name} (to MSL): {e}");
+            ok = false;
+        }
+    }
+    assert!(ok, "FSR shader errors above");
+}

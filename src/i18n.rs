@@ -114,7 +114,9 @@ fn fr(en: &str) -> Option<&'static str> {
         "Go to" => "Destinations",
         "Weather" => "Météo",
         "Game" => "Jeu",
+        "Route" => "Itinéraire",
         "Settings" => "Réglages",
+        "Graphics" => "Graphismes",
         "Controls" => "Commandes",
 
         // ---- controls list: headings
@@ -153,10 +155,13 @@ fn fr(en: &str) -> Option<&'static str> {
         "look around" => "regarder autour",
         "camera distance / cockpit zoom" => "distance caméra / zoom cockpit",
         "hide / show the HUD" => "masquer / afficher le HUD",
+        "large map (wheel zoom, drag pan)" => "grande carte (molette : zoom, glisser : déplacer)",
         "screenshot" => "capture d'écran",
         "time of day forward / back" => "avancer / reculer l'heure",
         "more / fewer clouds" => "plus / moins de nuages",
         "weather & time window" => "fenêtre météo et heure",
+        "sim speed slower / faster (1× to 8×)" => "vitesse de simulation moins / plus vite (1× à 8×)",
+        "autopilot: fly to the next route waypoint" => "pilote automatique : vers le prochain point de l'itinéraire",
         "flight panel: instruments, places, weather" => "panneau de vol : instruments, destinations, météo",
         "pause menu: settings, globe, quit" => "menu pause : réglages, globe, quitter",
         "pause without the menu" => "pause sans le menu",
@@ -164,6 +169,8 @@ fn fr(en: &str) -> Option<&'static str> {
         "respawn in the air" => "réapparaître en vol",
         "sound on / off" => "son activé / coupé",
         "anti-aliasing (TAA) on / off" => "anticrénelage (TAA) activé / désactivé",
+        "frame rate counter" => "compteur d'images par seconde",
+        "fullscreen on / off" => "plein écran activé / désactivé",
         "quick key reference" => "aide-mémoire des touches",
         "pitch and roll" => "tangage et roulis",
         "throttle up / down (hold)" => "plus / moins de gaz (maintenir)",
@@ -228,6 +235,7 @@ fn fr(en: &str) -> Option<&'static str> {
         "Twin-engine carrier fighter, 15.5 t. Fly-by-wire holds it to 7.5 g; Space for afterburner, / speedbrake. 135 kt approach." => "Chasseur embarqué biréacteur, 15,5 t. Les commandes de vol électriques le limitent à 7,5 g ; Espace pour la postcombustion, / aérofreins. Approche à 135 kt.",
         "Four-seat single, 180 hp, retractable gear. Forgiving and slow: 125 kt flat out." => "Monomoteur quatre places, 180 ch, train rentrant. Indulgent et lent : 125 kt à fond.",
         "Four-engine wide-body airliner, 290 t. Heavy and slow to answer the controls; Mach 0.85 cruise, 150 kt approach. / speedbrake, Z reversers." => "Quadriréacteur gros-porteur, 290 t. Lourd et lent à répondre aux commandes ; croisière à Mach 0,85, approche à 150 kt. / aérofreins, Z inverseurs.",
+        "The 747-400 at five times its size: 353 m long, 322 m across, 7,250 t. Same speeds and handling as the 747. / speedbrake, Z reversers." => "Le 747-400 cinq fois plus grand : 353 m de long, 322 m d'envergure, 7 250 t. Mêmes vitesses et même pilotage que le 747. / aérofreins, Z inverseurs.",
 
         // ---- places (cities, one-click places, airports)
         "Mexico City" => "Mexico",

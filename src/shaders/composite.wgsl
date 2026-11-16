@@ -553,6 +553,71 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   return max(col, vec3f(0.0));
 }
 
+// Whether this pipeline shades water. The land pass (render.rs, "composite"
+// with FABLE_OPT_OFF=comp_split unset) is built with it false, so the water
+// shading and the per-sample loop are compiled out of it: with them in, the
+// registers they need cost every pixel of the screen occupancy (some 7 ms at
+// High fullscreen). Water pixels then get the "composite water" pass, and
+// with MSAA the pixels that mix water and not "composite edge".
+override WATER: bool = true;
+
+// Whether composite_sample takes the water path: the same test as inside it.
+fn is_water(z: f32, c0: vec4f, a0: vec4f) -> bool {
+  return !(z == 0.0 || c0.a < 0.004) && a0.a / c0.a > 0.996;
+}
+
+// Falling snow (G.alto.w how hard): four layers of flakes 4, 8, 16 and 32 m
+// out, hidden behind anything nearer. Each layer is a grid of cells over the
+// directions around the camera, in log-polar angles about the direction the
+// flakes stream from (G.snow.xyz): moving through them is then sliding the
+// grid outward, by G.snow.w over the layer's distance. The wrap of G.snow.w
+// (SNOW_WRAP in main.rs) is a whole number of cells in each layer, and the
+// pattern repeats over that many, so it never jumps.
+const SNOW_N = 96.0;  // cells around the axis
+fn snowfall(col: vec3f, rd: vec3f, dist: f32) -> vec3f {
+  let amt = G.alto.w;
+  if (amt <= 0.001) { return col; }
+  let ax = normalize(G.snow.xyz);
+  let ct = clamp(dot(rd, ax), -0.9999, 0.9999);
+  let st = sqrt(1.0 - ct * ct);
+  // log(tan(theta / 2)), and the angle around the axis
+  let u = log(st / (1.0 + ct));
+  var e1 = cross(ax, vec3f(0.0, 0.0, 1.0));
+  if (dot(e1, e1) < 1e-4) { e1 = cross(ax, vec3f(1.0, 0.0, 0.0)); }
+  e1 = normalize(e1);
+  let e2 = cross(ax, e1);
+  let v = atan2(dot(rd, e2), dot(rd, e1));
+  let cu = 6.2831853 / SNOW_N;
+  let l = light_at_nv(vec3f(0.0));
+  let lit = (l.sun * max(dot(l.upn, G.sun_dir.xyz), 0.0) * 0.6 / PI + l.amb) * 0.85;
+  var c = col;
+  var d = 4.0;
+  var period = 64.0;
+  // (fewer toward the point they stream from, where the cells crowd together)
+  let thin = smoothstep(0.04, 0.35, st);
+  for (var i = 0; i < 4; i++) {
+    if (dist > d) {
+      // Each layer's grid turned and shifted its own way, so no two line up.
+      let g = vec2f((u - G.snow.w / d) / cu + f32(i) * 0.37, (v + 3.14159265) / cu + f32(i) * 0.61);
+      let cell = floor(g);
+      let cx = cell.x - period * floor(cell.x / period);
+      let cy = cell.y - SNOW_N * floor(cell.y / SNOW_N);
+      let h = vec3f(hash2(vec2f(cx, cy) + f32(i) * 17.0), hash2(vec2f(cy, cx) + f32(i) * 31.0), hash2(vec2f(cx + 0.5, cy * 1.7) + f32(i) * 5.0));
+      // One cell in so many holds a flake, more the harder it snows.
+      if (h.z < (0.12 + 0.3 * amt) * thin) {
+        let f = (cell + 0.12 + 0.76 * h.xy - g) * cu * st;  // angle to the flake (rad)
+        let r = (0.008 + 0.012 * fract(h.z * 13.7)) / d;
+        let rp = max(r, G.misc.w * 0.8);
+        let a = (1.0 - smoothstep(rp * 0.4, rp, length(f))) * (r * r) / (rp * rp) * min(amt * 2.0, 1.0) * 0.9;
+        c = mix(c, lit, a);
+      }
+    }
+    d *= 2.0;
+    period *= 0.5;
+  }
+  return c;
+}
+
 fn composite_sample(in: FsIn, z: f32, c0: vec4f, a0: vec4f, amb: f32) -> vec3f {
   let px = vec2i(in.pos.xy);
   let ray = view_ray(in.uv);
@@ -562,7 +627,7 @@ fn composite_sample(in: FsIn, z: f32, c0: vec4f, a0: vec4f, amb: f32) -> vec3f {
   // Alpha is how much of the pixel geometry covers (the anti-aliased edge).
   let cov = c0.a;
   if (z == 0.0 || cov < 0.004) {
-    return clamp(sky_color(rd, jit), vec3f(0.0), vec3f(3000.0));
+    return clamp(snowfall(sky_color(rd, jit), rd, 1e9), vec3f(0.0), vec3f(3000.0));
   }
   let P = ray / z;
   let dist = length(P);
@@ -574,6 +639,7 @@ fn composite_sample(in: FsIn, z: f32, c0: vec4f, a0: vec4f, amb: f32) -> vec3f {
     col *= 1.0 - share * (1.0 - textureLoad(t_ao, px, 0).r);
   }
   if (aux.a > 0.996) {
+    if (!WATER) { return vec3f(0.0); }
     col = water(P, rd, dist, col, aux, jit);
   }
   else if (aux.a < -0.01 && G.misc.z > 0.5) {
@@ -593,33 +659,72 @@ fn composite_sample(in: FsIn, z: f32, c0: vec4f, a0: vec4f, amb: f32) -> vec3f {
     let t0 = max(top.x, 0.0);
     let t1 = min(dist, top.y);
     if (t1 > t0) {
-      let sc = atm_march(oc, rd, t0, t1, 12, fract(jit + G.time.w * 0.618034));
+      let sc = atm_march(oc, rd, t0, t1, atm_steps(12), fract(jit + G.time.w * 0.618034));
       col = col * sc.T + sc.L + SKYGLOW * 0.004 * G.misc.y * night_cam() * (1.0 - luma(sc.T));
     }
   }
   if (cov < 0.996) { col = mix(sky_color(rd, jit), col, cov); }
+  col = snowfall(col, rd, dist);
   return clamp(col, vec3f(0.0), vec3f(3000.0));
 }
 
-@fragment fn fs(in: FsIn) -> @location(0) vec4f {
-  let px = vec2i(in.pos.xy);
-  var water_samples = 0;
+// How many of the pixel's samples are water, where the resolved marker allows
+// a mix of water and not: the resolved marker already tells a pixel with no
+// water (0, or near it) or all water (1) from a mix of them (in between, or
+// below with glass), and only those read their samples. (G.vol_n.w = 1:
+// FABLE_OPT_OFF=water_edge reads them everywhere, as before)
+fn water_samples(px: vec2i) -> i32 {
+  var n = 0;
+  let ra = textureLoad(t_aux, px, 0).a;
+  let mixed = !((ra >= -0.01 && ra <= 0.004) || ra > 0.996) || G.vol_n.w > 0.5;
   for (var i = 0; i < 4; i++) {
-    if (textureLoad(t_aux_ms, px, i).a > 0.996) { water_samples++; }
+    if (mixed && textureLoad(t_aux_ms, px, i).a > 0.996) { n++; }
   }
-  if (water_samples > 0 && water_samples < 4) {
-    // Shade before resolving: each water sample needs its own tint, parameters
-    // and depth, even when no neighbouring pixel is entirely water. Foreground
-    // samples retain their own lighting and haze rather than water's colour.
-    var col = vec3f(0.0);
-    for (var i = 0; i < 4; i++) {
-      col += composite_sample(in, textureLoad(t_depth_ms, px, i),
-        textureLoad(t_color_ms, px, i), textureLoad(t_aux_ms, px, i),
-        textureLoad(t_amb_ms, px, i).r);
-    }
-    return vec4f(col * 0.25, 1.0);
+  return n;
+}
+// Shade before resolving: each water sample needs its own tint, parameters
+// and depth, even when no neighbouring pixel is entirely water. Foreground
+// samples retain their own lighting and haze rather than water's colour.
+fn per_sample(in: FsIn, px: vec2i) -> vec4f {
+  var col = vec3f(0.0);
+  for (var i = 0; i < 4; i++) {
+    col += composite_sample(in, textureLoad(t_depth_ms, px, i),
+      textureLoad(t_color_ms, px, i), textureLoad(t_aux_ms, px, i),
+      textureLoad(t_amb_ms, px, i).r);
   }
+  return vec4f(col * 0.25, 1.0);
+}
+fn single(in: FsIn, px: vec2i) -> vec4f {
   return vec4f(composite_sample(in, textureLoad(t_depth, px, 0),
     textureLoad(t_color, px, 0), textureLoad(t_aux, px, 0),
     textureLoad(t_amb, px, 0).r), 1.0);
+}
+
+// All in one pass (FABLE_OPT_OFF=comp_split).
+@fragment fn fs(in: FsIn) -> @location(0) vec4f {
+  let px = vec2i(in.pos.xy);
+  let n = water_samples(px);
+  if (n > 0 && n < 4) { return per_sample(in, px); }
+  return single(in, px);
+}
+// MSAA off (Medium and Low): one sample a pixel, and no multisampled inputs
+// bound. Built with WATER false it is also the land pass, MSAA or not: its
+// water pixels (and the mixed ones) are then left to fs_water(1).
+@fragment fn fs1(in: FsIn) -> @location(0) vec4f {
+  return single(in, vec2i(in.pos.xy));
+}
+// After the land pass, over it: the water pixels (fs_water1, MSAA or not),
+// then with MSAA those whose samples mix water and not (fs_edge). The rest
+// keep what the passes before gave them, which is what fs gives them. Three
+// passes, not one: each keeps only the registers its own work needs.
+@fragment fn fs_water1(in: FsIn) -> @location(0) vec4f {
+  let px = vec2i(in.pos.xy);
+  if (!is_water(textureLoad(t_depth, px, 0), textureLoad(t_color, px, 0), textureLoad(t_aux, px, 0))) { discard; }
+  return single(in, px);
+}
+@fragment fn fs_edge(in: FsIn) -> @location(0) vec4f {
+  let px = vec2i(in.pos.xy);
+  let n = water_samples(px);
+  if (n == 0 || n == 4) { discard; }
+  return per_sample(in, px);
 }

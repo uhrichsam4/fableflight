@@ -28,6 +28,8 @@ pub struct Target {
     pub alto: f32,
     pub storms: f32,
     pub haze: f32,
+    /// snow 0..1 (falling, or freezing with precipitation)
+    pub snow: f32,
     /// m/s, and where from (None: variable)
     pub wind: f64,
     pub wind_from: Option<f64>,
@@ -104,6 +106,7 @@ impl LiveWx {
         wx.alto = mix(wx.alto, t.alto);
         wx.storms = mix(wx.storms, t.storms);
         wx.haze = mix(wx.haze, t.haze);
+        wx.snow = mix(wx.snow, t.snow);
         wx.wind += (t.wind - wx.wind) * k;
         wx.gusts += (t.gusts - wx.gusts) * k;
         if let Some(from) = t.wind_from {
@@ -236,12 +239,23 @@ fn from_metar(m: &serde_json::Value) -> Option<Target> {
         alto,
         storms,
         haze: haze(if cavok { None } else { vis_km }, foggy),
+        snow: metar_snow(wx, m["temp"].as_f64()),
         wind,
         wind_from,
         gusts: gust.map(|g| ((g - wind) / 8.0).clamp(0.0, 1.0)).unwrap_or(0.1),
         station,
         raw,
     })
+}
+
+/// Snow from a METAR's weather: SN (light -SN, heavy +SN), or any
+/// precipitation at or below freezing.
+fn metar_snow(wx: &str, temp: Option<f64>) -> f32 {
+    if wx.contains("SN") {
+        return if wx.contains("+SN") { 0.9 } else if wx.contains("-SN") { 0.4 } else { 0.65 };
+    }
+    let precip = ["RA", "DZ", "PL", "GS", "GR", "SG", "UP"].iter().any(|p| wx.contains(p));
+    if precip && temp.is_some_and(|t| t <= 0.0) { 0.5 } else { 0.0 }
 }
 
 /// "6+", "1/2", "1 1/2" statute miles.
@@ -307,6 +321,13 @@ fn from_open_meteo(j: &serde_json::Value) -> Option<Target> {
         alto: mid,
         storms,
         haze: haze(f("visibility").map(|v| v / 1000.0), matches!(code, 45 | 48)),
+        snow: match code {
+            71 | 85 => 0.4,
+            73 | 77 => 0.65,
+            75 | 86 => 0.9,
+            51..=67 | 80..=82 if f("temperature_2m").is_some_and(|t| t <= 0.0) => 0.5,
+            _ => 0.0,
+        },
         wind,
         wind_from: f("wind_direction_10m"),
         gusts: f("wind_gusts_10m").map(|g| ((g - wind) / 8.0).clamp(0.0, 1.0)).unwrap_or(0.1),
@@ -333,6 +354,8 @@ mod tests {
         assert_eq!(t.alto, 1.0);
         assert!((t.base_m.unwrap() - (1200.0 / 3.28084 + 25.0) as f32).abs() < 0.5);
         assert!(t.haze < 2.0);
+        assert_eq!(t.snow, 0.0);
+        assert_eq!((metar_snow("-SN", Some(-2.0)), metar_snow("+SN BR", None), metar_snow("-RA", Some(-1.0)), metar_snow("RA", Some(4.0))), (0.4, 0.9, 0.5, 0.0));
 
         let cavok = serde_json::json!({"icaoId":"EBBR","rawOb":"METAR EBBR 151720Z 19010KT CAVOK 10/09 Q0999","elev":56,"wdir":190,"wspd":10,"visib":"6+","clouds":[]});
         let t = from_metar(&cavok).unwrap();

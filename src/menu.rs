@@ -240,13 +240,15 @@ pub enum Page {
     Places,
     Weather,
     Game,
+    Route,
     Settings,
+    Graphics,
     Controls,
 }
 
 impl Page {
     pub const INFO: [Page; 3] = [Page::Flight, Page::Places, Page::Weather];
-    pub const PAUSE: [Page; 3] = [Page::Game, Page::Settings, Page::Controls];
+    pub const PAUSE: [Page; 5] = [Page::Game, Page::Route, Page::Settings, Page::Graphics, Page::Controls];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -254,7 +256,9 @@ impl Page {
             Page::Places => "Go to",
             Page::Weather => "Weather",
             Page::Game => "Game",
+            Page::Route => "Route",
             Page::Settings => "Settings",
+            Page::Graphics => "Graphics",
             Page::Controls => "Controls",
         }
     }
@@ -301,18 +305,21 @@ pub const CONTROLS: &[(&str, &[(&str, &str)])] = &[
         ("/", "speedbrake (airliners)"),
         ("Z", "thrust reversers, on the ground (hold)"),
         ("K", "set the heading indicator to the compass"),
+        ("J", "autopilot: fly to the next route waypoint"),
     ]),
     ("VIEW", &[
         ("C", "chase / cockpit camera"),
         ("Mouse drag", "look around"),
         ("Mouse wheel", "camera distance / cockpit zoom"),
         ("H", "hide / show the HUD"),
+        ("M", "large map (wheel zoom, drag pan)"),
         ("F12", "screenshot"),
     ]),
     ("WORLD", &[
         ("T / Y", "time of day forward / back"),
-        ("N / M", "more / fewer clouds"),
+        ("N / X", "more / fewer clouds"),
         ("F3", "weather & time window"),
+        ("[ / ]", "sim speed slower / faster (1× to 8×)"),
     ]),
     ("GAME", &[
         ("Tab", "flight panel: instruments, places, weather"),
@@ -322,6 +329,8 @@ pub const CONTROLS: &[(&str, &[(&str, &str)])] = &[
         ("R", "respawn in the air"),
         ("U", "sound on / off"),
         ("F2", "anti-aliasing (TAA) on / off"),
+        ("F4", "frame rate counter"),
+        ("F11", "fullscreen on / off"),
         ("F1", "quick key reference"),
     ]),
     ("GAMEPAD (MSFS 2020 layout)", &[

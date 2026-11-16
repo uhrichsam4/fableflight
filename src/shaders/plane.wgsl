@@ -36,10 +36,15 @@ const P_PIT = 18u; const P_MESH = 19u; const P_WEBBING = 20u; const P_NONSLIP = 
 @group(1) @binding(1) var t_paint: texture_2d_array<f32>;
 
 // Which aircraft is being drawn (aircraft::Spec::id, carried in glow.y): 0 the
-// light single, 1 the 747, 2 the Hornet. Its windows, wells, paint and panel
-// lines differ. tint.y and tint.z carry the engines: how far the afterburners
-// are lit, and how hard they are running dry (0 idle .. 1).
-fn kind() -> u32 { return u32(O.glow.y + 0.5); }
+// light single, 1 the 747, 2 the Hornet, 3 and 4 the 747 five and twenty times
+// the size (aircraft/b747big.rs), drawn as the 747 with its body frame (L)
+// shrunk back by `kscale`. Their windows, wells, paint and panel lines differ. tint.y and
+// tint.z carry the engines: how far the afterburners are lit, and how hard
+// they are running dry (0 idle .. 1).
+fn kind() -> u32 { let k = u32(O.glow.y + 0.5); return select(k, 1u, k == 3u || k == 4u); }
+// How many times its model's size the aircraft is (aircraft::Spec::size_k,
+// carried in glow.z; 0 for everything else).
+fn kscale() -> f32 { return max(O.glow.z, 1.0); }
 // The engines, of the aircraft being flown only (wreckage and parts that have come off carry a glow.x).
 fn burner() -> f32 { return O.tint.y * step(O.glow.x, 0.001); }
 fn dry_power() -> f32 { return O.tint.z * step(O.glow.x, 0.001); }
@@ -65,10 +70,10 @@ struct SOut { @builtin(position) clip: vec4f, @location(0) L: vec3f, @location(1
 @vertex fn vs(@location(0) pos: vec3f, @location(1) nrm: vec3f, @location(2) col: vec4f, @location(3) uv: vec2f, @location(4) mat: vec4f) -> VOut {
   let P = (O.model * vec4f(pos, 1.0)).xyz;
   let N = (O.model * vec4f(nrm, 0.0)).xyz;
-  return VOut(G.view_proj * vec4f(P, 1.0), P, N, col, uv, mat, mat.z, pos, nrm);
+  return VOut(G.view_proj * vec4f(P, 1.0), P, N, col, uv, mat, mat.z, pos / kscale(), nrm);
 }
 @vertex fn vs_shadow(@location(0) pos: vec3f, @location(4) mat: vec4f) -> SOut {
-  return SOut(CS.vp * vec4f((O.model * vec4f(pos, 1.0)).xyz, 1.0), pos, mat);
+  return SOut(CS.vp * vec4f((O.model * vec4f(pos, 1.0)).xyz, 1.0), pos / kscale(), mat);
 }
 @fragment fn fs_shadow(in: SOut) {
   // Sunlight comes in through the windows, the gear wells stay open, and
@@ -153,8 +158,10 @@ fn torn() -> bool { return O.dmg.x != 0.0 || O.dmg.y != 0.0; }
 // Signed distance past the piece's break(s): positive where it has been torn
 // away. The edge wanders by dmg.w, the same way on both sides of the break,
 // so the stump and the part that left share one ragged line.
-fn tear_d(L: vec3f) -> f32 {
+fn tear_d(L0: vec3f) -> f32 {
   if (!torn()) { return -1e3; }
+  // (the breaks are in the full-size body frame)
+  let L = L0 * kscale();
   let jag = O.dmg.w;
   // A few big jags, torn skin between them, and fine shredding along the edge.
   let n1 = (nz(L * 1.4).r - 0.5) * 1.6 + (nz(L * 4.5).b - 0.5) * 0.7;
@@ -1215,7 +1222,7 @@ fn surface(in: VOut) -> Shaded {
   // Everything that needs screen derivatives first, while control flow is uniform.
   let dPx = dpdx(in.P);
   let dPy = dpdy(in.P);
-  let px = max(length(dPx), length(dPy));
+  let px = max(length(dPx), length(dPy)) / kscale();
   let duv = max(length(dpdx(in.uv)), length(dpdy(in.uv)));
   let dLx = dpdx(in.L);
   let dLy = dpdy(in.L);
@@ -1694,7 +1701,7 @@ fn cabin_mirror(p0: vec3f, r: vec3f, l: Light, ls: vec3f) -> vec3f {
     let g = (GS_Z + 0.025 - p.z) / 0.46;
     if (g >= 0.0 && g <= 1.0 && abs(p.x) < 0.56 && p.y < 0.185 + 0.12 * g * g * g) {
       let up = normalize(O.model[1].xyz);
-      let sg = shadow_at((O.model * vec4f(p, 1.0)).xyz, up);
+      let sg = shadow_at((O.model * vec4f(p * kscale(), 1.0)).xyz, up);
       let weave = 0.75 + 0.5 * nz(p * 23.0).g;
       // Black fabric, a little dusty.
       return vec3f(0.055, 0.054, 0.056) * weave / PI * (l.sun * max(ls.y, 0.0) * sg + l.amb * 0.55);
@@ -1708,7 +1715,7 @@ fn cabin_mirror(p0: vec3f, r: vec3f, l: Light, ls: vec3f) -> vec3f {
 const GS_Z = -1.30; // cabin::PANEL_Z
 
 @fragment fn fs_glass(in: VOut) -> @location(0) vec4f {
-  let px = max(length(dpdx(in.P)), length(dpdy(in.P)));
+  let px = max(length(dpdx(in.P)), length(dpdy(in.P))) / kscale();
   let id = u32(in.mat.x + 0.5);
   if (id == M_PLUME) { return plume(in); }
   let V = normalize(in.P);
@@ -1748,7 +1755,7 @@ const GS_Z = -1.30; // cabin::PANEL_Z
   let R = reflect(V, N);
   // The body frame (rigid): where the eye is, and the window's own axes.
   let ml = transpose(mat3x3f(O.model[0].xyz, O.model[1].xyz, O.model[2].xyz));
-  let eye_l = -(ml * O.model[3].xyz);
+  let eye_l = -(ml * O.model[3].xyz) / kscale();
   var in_cabin = from_inside && abs(eye_l.x) < 0.6 && eye_l.y > -0.5 && eye_l.y < 0.85 && eye_l.z > -1.3 && eye_l.z < 1.6;
   if (kind() == 1u) { in_cabin = from_inside && abs(eye_l.x) < 1.6 && eye_l.y > 2.2 && eye_l.y < 4.8 && eye_l.z > -28.5 && eye_l.z < -22.5; }
   if (kind() == 2u) { in_cabin = from_inside && abs(eye_l.x) < 0.6 && eye_l.y > 0.2 && eye_l.y < 1.5 && eye_l.z > -6.3 && eye_l.z < -2.6; }

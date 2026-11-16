@@ -471,6 +471,8 @@ pub static SPEC: Spec = Spec {
     cam_dist: 26.0,
     shadow_r: 11.0,
     sound: Sound::Fighter,
+    size_k: 1.0,
+    speed_k: 1.0,
 };
 
 #[cfg(test)]

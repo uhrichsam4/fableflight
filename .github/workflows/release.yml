@@ -1,0 +1,44 @@
+name: Release
+
+# Push a tag like v0.2.0 (or run it by hand) to build the game for Windows
+# and attach a zip with the .exe to a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/fablegame.exe "dist/Samiams Flight Sim.exe"
+          Copy-Item README.md, LICENSE dist/
+          Compress-Archive -Path dist/* -DestinationPath SamiamsFlightSim-windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SamiamsFlightSim-windows
+          path: SamiamsFlightSim-windows.zip
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: SamiamsFlightSim-windows.zip
+          body: |
+            **Windows:** download `SamiamsFlightSim-windows.zip`, unzip it, and double-click `Samiams Flight Sim.exe`.
+            Windows may show "Windows protected your PC" because the game isn't signed: click **More info → Run anyway**.

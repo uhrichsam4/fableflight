@@ -504,8 +504,9 @@ pub struct Shed {
     span: f32,
     scuff: f32,
     seed: f32,
-    /// which aircraft it came off (its paint, see plane.wgsl)
+    /// which aircraft it came off (its paint, see plane.wgsl), and its `Spec::size_k`
     kind: f32,
+    size: f32,
     age: f32,
     bounces: u8,
     resting: bool,
@@ -595,6 +596,7 @@ impl Sheds {
                 scuff: dmg.scuff[p.group].max(0.4),
                 seed,
                 kind: dmg.spec.id as f32,
+                size: dmg.spec.size_k,
                 age: 0.0,
                 bounces: 0,
                 resting: false,
@@ -686,7 +688,7 @@ impl Sheds {
             objs.push(DrawObj {
                 mesh: s.mesh,
                 model,
-                glow: [0.25, s.kind, 0.0, s.seed],
+                glow: [0.25, s.kind, s.size, s.seed],
                 params,
                 cast: 0b11,
                 cut: s.cut,

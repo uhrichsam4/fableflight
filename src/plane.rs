@@ -343,11 +343,13 @@ impl Plane {
     /// How far past its speed limits it is (m/s indicated; the Mach limit counted
     /// as the same margin in speed), negative within them.
     pub fn overspeed(&self) -> f64 {
-        self.excess(self.ias(), self.mach())
+        self.excess(self.ias(), self.mach() / self.spec.speed_k)
     }
+    /// (In the base type's m/s for a scaled-up one, and with its Mach number
+    /// divided by `Spec::speed_k`, so its margins are the base type's.)
     fn excess(&self, ias: f64, mach: f64) -> f64 {
         let s = self.spec;
-        let e = ias - s.vne;
+        let e = (ias - s.vne) / s.speed_k;
         if s.mmo > 0.0 { e.max((mach - s.mmo) * 300.0) } else { e }
     }
     /// Start out with the flaps at `notch` and the gear as given, re-trimmed
@@ -814,7 +816,7 @@ impl Plane {
                 let rho = density(h);
                 Self::prop_load(pe, Self::prop_equilibrium(pe, throttle, v, rho), v, rho, 1.0).0
             }
-            Engine::Fan(fe) => Self::fan_thrust(fe, Self::n1_target(fe, throttle), v, h),
+            Engine::Fan(fe) => Self::fan_thrust(fe, Self::n1_target(fe, throttle), v / self.spec.speed_k, h),
         }
     }
     /// The engine already running as the throttle has it.
@@ -851,7 +853,7 @@ impl Plane {
         let s = self.spec;
         let qs = 0.5 * density(h) * v * v * s.wing_area;
         let cl = s.mass * 9.81 / qs.max(1.0);
-        qs * (s.cd0 + s.k_ind * cl * cl + s.cd_flap[0] * flaps + s.cd_flap[1] * flaps * flaps + s.cd_gear * gear + self.wave_cd(v / sound_speed(h)))
+        qs * (s.cd0 + s.k_ind * cl * cl + s.cd_flap[0] * flaps + s.cd_flap[1] * flaps * flaps + s.cd_gear * gear + self.wave_cd(v / (sound_speed(h) * s.speed_k)))
     }
     /// Throttle to hold `v` while coming down at `descent` m/s.
     fn throttle_for(&self, v: f64, h: f64, flaps: f64, gear: f64, descent: f64) -> f64 {
@@ -1031,7 +1033,9 @@ impl Plane {
         self.turbulence(dt, v_air, upw);
         let vb = self.rot.inverse() * self.airspeed();
         let v = vb.length();
-        let mach = v / sound_speed(h);
+        // The Mach number the airframe feels: one flying `speed_k` times as fast
+        // as the type it scales up meets its shock waves that much later.
+        let mach = v / (sound_speed(h) * spec.speed_k);
         let mut force_b = DVec3::ZERO;
         let mut wdot = DVec3::ZERO;
         let q = 0.5 * rho * v * v;
@@ -1105,7 +1109,7 @@ impl Plane {
             // angle the rotation adds at the wing tip or tail, ω·arm / V), so a
             // slow aircraft is sluggish and a fast one crisp.
             let a = (q / hd.q_ref).clamp(0.0, hd.a_max);
-            let ad = (a * hd.damp_v / v.max(20.0)).clamp(hd.ad_min, hd.ad_max);
+            let ad = (a * hd.damp_v / v.max(20.0 * spec.speed_k)).clamp(hd.ad_min, hd.ad_max);
             // Relative to the air, which is itself turning in the eddies.
             let om = self.omega - self.gust_rot;
             // Auto-trim: while the pilot is flying the stick it winds the trim to
@@ -1245,7 +1249,7 @@ impl Plane {
                 let kr = if up { fe.spool_up * (0.3 + 0.7 * self.n1) } else { fe.spool_down };
                 self.n1 += (target - self.n1) * (dt * kr).min(1.0);
                 self.prop_rate = self.n1 * fe.n1_rpm * std::f64::consts::TAU / 60.0;
-                let mut thrust = Self::fan_thrust(fe, self.n1, v.max(0.0), h) * if c.boost { fe.boost } else { 1.0 };
+                let mut thrust = Self::fan_thrust(fe, self.n1, v.max(0.0) / spec.speed_k, h) * if c.boost { fe.boost } else { 1.0 };
                 // An afterburner (not an airliner's take-off bump) lights with a
                 // thump a moment after it is asked for and dies away as quickly.
                 let lit = c.boost && fe.boost > 1.2 && self.dmg.engine > 0.0 && self.n1 > fe.idle * 0.9;
@@ -1622,7 +1626,7 @@ impl Plane {
         }
         let ve = v * eas_k;
         let excess = self.excess(ve, mach);
-        let over = (excess - (spec.flutter_v - spec.vne)).max(0.0) as f32;
+        let over = (excess - (spec.flutter_v - spec.vne) / spec.speed_k).max(0.0) as f32;
         self.dmg.flutter = (self.dmg.flutter + (over * 0.035 - 0.25) * dt as f32).max(0.0);
         self.dmg.vibe += smooth(5.0, 30.0, excess) as f32 * 0.6;
         if self.dmg.flutter > 1.0 {
@@ -1631,7 +1635,7 @@ impl Plane {
         }
         let vfe = self.vfe();
         if self.flaps > 0.25 * spec.flap_frac(1) && ve > vfe {
-            self.dmg.flap_stress += (dt * (ve - vfe) * 0.06 * self.flaps.max(0.3)) as f32;
+            self.dmg.flap_stress += (dt * (ve - vfe) / spec.speed_k * 0.06 * self.flaps.max(0.3)) as f32;
             if self.dmg.flap_stress > 1.0 {
                 let s = (self.rng.f() * 2.0) as usize;
                 let s = if self.dmg.flap[s] > 0.0 { s } else { 1 - s };

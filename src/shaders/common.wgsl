@@ -22,8 +22,9 @@ struct Globals {
   prev_vp: mat4x4f,  // last frame's view-projection (without its sub-pixel offset), relative to last frame's camera
   cam_delta: vec4f,  // xyz camera movement since last frame, w = 1 if history is usable
   moon: vec4f,       // xyz direction to the moon, w illuminance
-  vol_e: vec4f,      // volume east axis
-  vol_n: vec4f,      // volume north axis
+  vol_e: vec4f,      // volume east axis; w (set by the renderer) the share of the
+                     // atmosphere march's steps taken (`atm_steps`): 1, or 0.5 below High clouds
+  vol_n: vec4f,      // volume north axis; w = 1 under FABLE_OPT_OFF=water_edge (composite.wgsl fs)
   pshadow_vp: mat4x4f, // the aircraft's own shadow map
   pshadow: vec4f,    // texel size (m), depth bias, share of the layer used, w = 1 when in use
   taa: vec4f,        // xy this frame's sub-pixel offset (uv), z = 1 if the frame history is usable, w = 1 if the aircraft is drawn
@@ -51,7 +52,7 @@ struct Globals {
   // it was begun. The looked-up one is a cross-fade of two maps, with their sun and
   // drift blended the same way.
   cs: array<vec4f, 12>,
-  alto: vec4f,       // mid-level cloud: amount 0..1, height (m)
+  alto: vec4f,       // mid-level cloud: amount 0..1, height (m); z snow lying 0..1 (with_snow), w snow falling 0..1
   // The ocean (ocean.rs): offset of its coordinates + direction the wind blows
   // toward (east, north); wind (m/s), significant wave height (m), whitecap
   // cover, 1; slope covariance (east-east, north-north, east-north) of the
@@ -63,8 +64,13 @@ struct Globals {
   // Churned white water where a crash went in, two each: centre (camera-relative)
   // + radius (m, 0 = none); strength 0..1, age (s), seed.
   foam: array<vec4f, 16>,
-  // The start screen: x = 1 while it shows (deep-space sky, no clouds).
+  // The start screen: x = 1 while it shows (deep-space sky, no clouds). Set by
+  // the renderer: y the cloud quality 0..2 (clouds.wgsl cloud_div), z = 1 with bloom off,
+  // w the shadow filter: 0 the 3x3 PCF in four lookups (pcf9); with
+  // FABLE_OPT_OFF=shadow_taps as before it, 1 four lookups half a texel out
+  // (Low and Medium shadows) or 2 nine lookups (shadow_world).
   start: vec4f,
+  snow: vec4f,       // falling snow: xyz direction the flakes stream from, w metres moved through them (composite.wgsl snowfall)
 };
 @group(0) @binding(0) var<uniform> G: Globals;
 @group(0) @binding(1) var t_trans: texture_2d<f32>;
@@ -195,6 +201,9 @@ fn phase_m(c: f32, g: f32) -> f32 {
 struct Scatter { L: vec3f, T: vec3f };
 // Single scattering plus the multi-scatter LUT along a ray segment. oc is the
 // ray origin relative to the planet centre.
+// Steps for an atmosphere march that takes `n` at full quality.
+fn atm_steps(n: i32) -> i32 { return max(i32(f32(n) * G.vol_e.w + 0.5), 4); }
+
 fn atm_march(oc: vec3f, rd: vec3f, tmin: f32, tmax: f32, steps: i32, jit: f32) -> Scatter {
   let sun = G.sun_dir.xyz;
   let c = dot(rd, sun);
@@ -604,15 +613,36 @@ fn ocean_disp(x: vec2f, sp: f32, w: vec3f) -> vec3f {
 // The aircraft's own shadow: a fine map a few metres across (drawn into the
 // top-left corner of its layer, pshadow.z of it), used everywhere
 // (so its shadow on the ground is as sharp as on its own wing).
+// Nine bilinear compare lookups a whole texel apart (a 3x3 PCF) weigh the
+// 4x4 texels under them 1-f, 1, 1, f along each axis (f: where `uv` falls
+// between texels). Two lookups an axis, each placed between a pair of those
+// texels by its share, weigh them exactly the same: the same filter in four
+// lookups instead of nine. Returns the sum (out of 9, as the nine would).
+fn pcf9(uv: vec2f, layer: i32, z: f32, dim: f32) -> f32 {
+  let p = uv * dim - 0.5;
+  let b = floor(p);
+  let f = p - b;
+  let wa = 2.0 - f;
+  let wb = 1.0 + f;
+  let ua = (b - 0.5 + 1.0 / wa) / dim;
+  let ub = (b + 1.5 + f / wb) / dim;
+  return wa.x * wa.y * textureSampleCompareLevel(t_shadow, s_shadow, ua, layer, z)
+       + wb.x * wa.y * textureSampleCompareLevel(t_shadow, s_shadow, vec2f(ub.x, ua.y), layer, z)
+       + wa.x * wb.y * textureSampleCompareLevel(t_shadow, s_shadow, vec2f(ua.x, ub.y), layer, z)
+       + wb.x * wb.y * textureSampleCompareLevel(t_shadow, s_shadow, ub, layer, z);
+}
 fn plane_shadow(P: vec3f, N: vec3f) -> f32 {
   if (G.pshadow.w <= 0.0) { return 1.0; }
   let tex = G.pshadow.x;
   let q = G.pshadow_vp * vec4f(P + N * tex * 1.5 + G.sun_dir.xyz * tex, 1.0);
   let uv = q.xy * vec2f(0.5, -0.5) + 0.5;
   if (any(uv <= vec2f(0.002)) || any(uv >= vec2f(0.998)) || q.z <= 0.0 || q.z >= 1.0) { return 1.0; }
+  let dim = f32(textureDimensions(t_shadow).x);
+  if (G.start.w < 0.5) { return pcf9(uv * G.pshadow.z, 3, q.z - G.pshadow.y, dim) / 9.0; }
+  let texel = 1.0 / dim;
   var sh = 0.0;
   for (var j = -1; j <= 1; j++) { for (var i = -1; i <= 1; i++) {
-    sh += textureSampleCompareLevel(t_shadow, s_shadow, uv * G.pshadow.z + vec2f(f32(i), f32(j)) / 4096.0, 3, q.z - G.pshadow.y);
+    sh += textureSampleCompareLevel(t_shadow, s_shadow, uv * G.pshadow.z + vec2f(f32(i), f32(j)) * texel, 3, q.z - G.pshadow.y);
   } }
   return sh / 9.0;
 }
@@ -623,6 +653,8 @@ fn shadow_at(P: vec3f, N: vec3f) -> f32 {
 fn shadow_world(P: vec3f, N: vec3f) -> f32 {
   var acc = 0.0;
   var rem = 1.0;
+  // (the map is SHADOW_RES or half of it on a side: render.rs set_shadow_res)
+  let texel = 1.0 / f32(textureDimensions(t_shadow).x);
   for (var c = 0; c < 3; c++) {
     let tex = G.csm[c];
     let q = G.shadow_vp[c] * vec4f(P + N * tex * 1.8 + G.sun_dir.xyz * tex * 0.8, 1.0);
@@ -630,9 +662,19 @@ fn shadow_world(P: vec3f, N: vec3f) -> f32 {
     let e = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
     if (e <= 0.0 || q.z <= 0.0 || q.z >= 1.0) { continue; }
     var sh = 0.0;
-    for (var j = -1; j <= 1; j++) { for (var i = -1; i <= 1; i++) {
-      sh += textureSampleCompareLevel(t_shadow, s_shadow, uv + vec2f(f32(i), f32(j)) / 4096.0, c, q.z - 0.00003);
-    } }
+    if (G.start.w < 0.5) {
+      sh = pcf9(uv, c, q.z - 0.00003, 1.0 / texel);
+    } else if (G.start.w < 1.5) {
+      // (FABLE_OPT_OFF=shadow_taps, Low and Medium shadows: four filtered
+      // lookups half a texel out, nearly the same 3x3 footprint)
+      for (var j = 0; j < 2; j++) { for (var i = 0; i < 2; i++) {
+        sh += 2.25 * textureSampleCompareLevel(t_shadow, s_shadow, uv + (vec2f(f32(i), f32(j)) - 0.5) * texel, c, q.z - 0.00003);
+      } }
+    } else {
+      for (var j = -1; j <= 1; j++) { for (var i = -1; i <= 1; i++) {
+        sh += textureSampleCompareLevel(t_shadow, s_shadow, uv + vec2f(f32(i), f32(j)) * texel, c, q.z - 0.00003);
+      } }
+    }
     let w = smoothstep(0.0, 0.07, e);
     acc += rem * w * sh / 9.0;
     rem *= 1.0 - w;
@@ -897,9 +939,13 @@ fn photo_cut(P: vec3f) -> bool { return photo_cut_at(P, true); }
 fn photo_shadow_gone(P: vec3f) -> bool {
   return G.photo.z > 0.0 && photo_fade(P) < 0.5 && photo_mask(P).r > 0.5 && !photo_cut_at(P, false);
 }
+// False for pipelines drawn only while there is no 3D tiles zone (G.photo.z
+// is 0, render.rs): their discard for it compiled out, the GPU's hidden-surface
+// removal works on them (FABLE_OPT_OFF=photo_solid).
+override PHOTO: bool = true;
 // Our own scenery at P (pixel px) is hidden by the mesh.
 fn photo_hides(P: vec3f, px: vec2f) -> bool {
-  return photo_covered(P) && photo_keep(P, px) && !photo_cut_at(P, false);
+  return PHOTO && photo_covered(P) && photo_keep(P, px) && !photo_cut_at(P, false);
 }
 
 fn night_at(upn: vec3f) -> f32 { return 1.0 - smoothstep(-0.08, 0.1, dot(upn, G.sun_dir.xyz)); }
@@ -1003,6 +1049,42 @@ fn point_light(P: vec3f, N: vec3f) -> vec3f {
   if (rad <= 0.0) { return vec3f(0.0); }
   let att = rad * rad / (rad * rad + r2);
   return G.light_col.rgb * att * max(dot(N, d * inverseSqrt(max(r2, 1e-6))) * 0.7 + 0.3, 0.0);
+}
+// Smooth 3D value noise for breaking up the snow cover.
+fn snow_vn(p: vec3f) -> f32 {
+  let i = floor(p);
+  let f = fract(p);
+  let u = f * f * (3.0 - 2.0 * f);
+  let a = mix(mix(hash3(i), hash3(i + vec3f(1.0, 0.0, 0.0)), u.x), mix(hash3(i + vec3f(0.0, 1.0, 0.0)), hash3(i + vec3f(1.0, 1.0, 0.0)), u.x), u.y);
+  let b = mix(mix(hash3(i + vec3f(0.0, 0.0, 1.0)), hash3(i + vec3f(1.0, 0.0, 1.0)), u.x), mix(hash3(i + vec3f(0.0, 1.0, 1.0)), hash3(i + vec3f(1.0, 1.0, 1.0)), u.x), u.y);
+  return mix(a, b, u.z);
+}
+// Snow lying on the ground, roofs and tree crowns (G.alto.z the amount):
+// on what faces up, more of it higher up. Light snow whitens only flat
+// ground in the mountains; deep snow all but the steep slopes everywhere.
+// It changes the albedo only, so the sun, shadows and relief still show;
+// steep rock, dark ground (rock, forest) and noisy drifts break it up, and
+// what lies thin lets the ground below show through.
+fn with_snow(albedo: vec3f, P: vec3f, N: vec3f) -> vec3f {
+  let s = G.alto.z;
+  if (s <= 0.001) { return albedo; }
+  let r = P - G.planet.xyz;
+  let h = length(r) - G.planet.w;
+  let amt = clamp(s * (0.55 + h / 1600.0), 0.0, 1.0);
+  let slope = dot(N, r * inverseSqrt(max(dot(r, r), 1.0)));
+  // (in ground coordinates: P is camera-relative and would swim)
+  let q = vec3f(wave_coord(P), h);
+  let n = snow_vn(q / 140.0) * 0.6 + snow_vn(q / 31.0) * 0.4;
+  let lum = dot(albedo, vec3f(0.3, 0.59, 0.11));
+  let dark = 1.0 - smoothstep(0.04, 0.2, lum);
+  // Steep ground sheds it: well short of vertical even in deep snow.
+  let th = mix(0.97, 0.72, amt) + (n - 0.5) * 0.12 + dark * 0.08;
+  let on_slope = smoothstep(th, th + 0.1, slope);
+  let cover = amt * 1.15 + (n - 0.5) * 0.8 - dark * 0.55;
+  let k = on_slope * smoothstep(0.35, 0.75, cover) * smoothstep(0.05, 0.35, amt) * 0.94;
+  // Snow ~0.8, a touch blue, a little uneven, keeping a trace of what is under it.
+  let snow = vec3f(0.74, 0.78, 0.84) * (0.9 + 0.2 * n) * mix(1.0, 0.75 + 1.25 * lum, 0.25);
+  return mix(albedo, snow, k);
 }
 fn shade(P: vec3f, N: vec3f, albedo: vec3f) -> vec3f {
   let l = light_at(P);

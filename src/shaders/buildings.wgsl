@@ -260,9 +260,15 @@ fn roof_glint(N: vec3f, V: vec3f, f0: vec3f, rough: f32) -> vec3f {
   return F * D * vis * ndl;
 }
 
+// False for the pipeline that draws what cannot be dissolving: level 0 runs
+// of a tile done fading in, with no 3D tiles zone (render.rs `solids`). With
+// no discard left in it the GPU's hidden-surface removal works on it, and
+// the facades behind it go unshaded (FABLE_OPT_OFF=build_solid).
+override DISSOLVE: bool = true;
+
 @fragment fn fs(in: VOut) -> GOut {
   // Inside the 3D tiles zone the mesh stands in for this (tiles3d.rs).
-  if (photo_hides(in.P, in.clip.xy)) { discard; }
+  if (DISSOLVE && photo_hides(in.P, in.clip.xy)) { discard; }
   // Each level of detail dissolves in: over a second or so when it arrives,
   // and building by building with distance as the camera approaches.
   let dcam = lod_dist(in.P, in.lod);
@@ -274,8 +280,8 @@ fn roof_glint(N: vec3f, V: vec3f, f0: vec3f, rough: f32) -> vec3f {
   if (lod == 1u) { fade = min(min(fade, T.lod.x), near); }
   else if (lod == 2u) { fade = min(fade, T.lod.y) * (1.0 - smoothstep(LOD2_FAR * 0.6, LOD2_FAR * 0.95, dcam)); }
   else if (lod == 3u) { fade = min(fade, near); }
-  else if (lod == 4u && n < near) { discard; }
-  if (fade < 1.0 && n >= fade) { discard; }
+  else if (DISSOLVE && lod == 4u && n < near) { discard; }
+  if (DISSOLVE && fade < 1.0 && n >= fade) { discard; }
   let V = normalize(in.P);
   var N = normalize(in.N);
   let kind = u32(in.col.a * 255.0 / 50.0 + 0.5);
@@ -419,6 +425,7 @@ fn roof_glint(N: vec3f, V: vec3f, f0: vec3f, rough: f32) -> vec3f {
       albedo = base * (0.8 + 0.2 * n);
     }
   }
+  albedo = with_snow(albedo, in.P, N);
   let c = shade(in.P, N, albedo) + extra;
   return GOut(vec4f(c, 1.0), vec4f(Nout, -mirror), amb_share(c));
 }

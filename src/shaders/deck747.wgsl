@@ -630,7 +630,7 @@ fn deck_mirror(p0: vec3f, r: vec3f, l: Light, ls: vec3f) -> vec3f {
     let p = p0 + r * t;
     let top = ey - 0.17 - 0.22 * max(ez - 0.70 - p.z, 0.0);
     if (p.z < ez - 0.68 && abs(p.x) < 1.0 && p.y < top) {
-      let sg = shadow_at((O.model * vec4f(p, 1.0)).xyz, normalize(O.model[1].xyz));
+      let sg = shadow_at((O.model * vec4f(p * kscale(), 1.0)).xyz, normalize(O.model[1].xyz));
       let weave = 0.75 + 0.5 * nz(p * 23.0).g;
       return vec3f(0.032, 0.03, 0.029) * weave / PI * (l.sun * max(ls.y, 0.0) * sg + l.amb * 0.5);
     }

@@ -86,11 +86,11 @@ fn photo_relight(own: bool) -> f32 {
 // piece, whose photographed light means nothing any more.
 fn photo_shade(P: vec3f, tex: vec4f, Nv: vec3f, tag: f32, own: bool) -> GOut {
   let l = light_at(P);
-  let albedo = tex.rgb;
   var N = Nv;
   if (dot(N, N) < 1e-6) { N = l.upn; }
   N = normalize(N);
   if (dot(N, P) > 0.0) { N = -N; }
+  let albedo = with_snow(tex.rgb, P, N);
   var Nl: vec3f;
   var sh: f32;
   var amb_k = 1.0;

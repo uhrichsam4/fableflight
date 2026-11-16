@@ -8,14 +8,16 @@
 //! Body frame (as in airframe.rs): +X right, +Y up, -Z forward, the origin at
 //! the centre of gravity.
 pub mod b747;
+pub mod b747big;
 pub mod c172;
 pub mod fa18;
 
-use crate::airframe::{Model, Sect};
+use crate::airframe::{Anim, Model, Sect};
 use glam::{DVec3, Vec3};
+use std::sync::LazyLock;
 
 /// Every type, in the order the menu lists them.
-pub static ALL: [&Spec; 3] = [&c172::SPEC, &b747::SPEC, &fa18::SPEC];
+pub static ALL: LazyLock<[&'static Spec; 5]> = LazyLock::new(|| [&c172::SPEC, &b747::SPEC, &*b747big::X5, &*b747big::X20, &fa18::SPEC]);
 
 /// A type by its short name (`c172`, `747`, ...), as typed on the command line.
 pub fn by_key(key: &str) -> Option<&'static Spec> {
@@ -52,6 +54,7 @@ pub enum Part {
 
 /// One landing gear leg: where its tyres meet the ground fully extended
 /// (body frame), and how it carries, steers and brakes the aircraft.
+#[derive(Clone)]
 pub struct Leg {
     pub at: DVec3,
     pub wheel_r: f64,
@@ -79,6 +82,7 @@ pub struct Leg {
 }
 
 /// How the airframe itself slides along the ground once it is down on it.
+#[derive(Clone)]
 pub struct Hull {
     pub k: f64,
     pub c: f64,
@@ -88,6 +92,7 @@ pub struct Hull {
 }
 
 /// Where the tail surfaces are, for breaking them and for what still touches the ground.
+#[derive(Clone)]
 pub struct Tail {
     /// height of the fin's root and how tall it is above that; the same for the rudder
     pub fin_y0: f32,
@@ -106,6 +111,7 @@ pub struct Tail {
 }
 
 /// A piston engine turning a fixed-pitch propeller.
+#[derive(Clone)]
 pub struct Piston {
     /// rated power (W) at rated revs (rad/s)
     pub power: f64,
@@ -129,6 +135,7 @@ pub struct Piston {
 }
 
 /// High-bypass turbofans.
+#[derive(Clone)]
 pub struct Fan {
     pub n: usize,
     /// sea-level static thrust of each (N)
@@ -151,6 +158,7 @@ pub struct Fan {
     pub mach_lapse: [f64; 2],
 }
 
+#[derive(Clone)]
 pub enum Engine {
     Piston(Piston),
     Fan(Fan),
@@ -159,6 +167,7 @@ pub enum Engine {
 /// The handling: angular accelerations straight from dynamic pressure (see
 /// `Plane::step`). `q_ref` is the dynamic pressure (Pa) at which control
 /// authority is "1"; `damp_v` turns rotation rates into damping.
+#[derive(Clone)]
 pub struct Handling {
     pub q_ref: f64,
     pub a_max: f64,
@@ -193,6 +202,7 @@ pub struct Handling {
 
 /// The head-on outline of the hole it punches through a building (m, body
 /// frame seen from ahead), see `destruct::Hitter`.
+#[derive(Clone)]
 pub struct Hole {
     /// fuselage half width and half height, its centre's height, corner radius
     pub fus: [f32; 4],
@@ -206,6 +216,7 @@ pub struct Hole {
     pub pods: [[f32; 3]; 2],
 }
 
+#[derive(Clone)]
 pub enum Sound {
     Piston,
     Jet,
@@ -315,6 +326,148 @@ pub struct Spec {
     pub cam_dist: f64,
     pub shadow_r: f32,
     pub sound: Sound,
+    /// how many times the size of the model it is drawn as (plane.wgsl's
+    /// `kscale`, sent in glow.z), and how many times the speeds of the type it
+    /// scales up (its Mach number, speed limits and wind noise are read
+    /// divided by it); 1 for a type of its own (see `scaled`)
+    pub size_k: f32,
+    pub speed_k: f64,
+}
+
+fn leak<T>(v: Vec<T>) -> &'static [T] {
+    Box::leak(v.into_boxed_slice())
+}
+
+/// A copy of `base` `kl` times its size in every dimension, flying `kv`
+/// times as fast. Its geometry scales by `kl`. Lift and drag at `kv` times the
+/// speed on `kl`² times the wing grow by f = kv²·kl², so mass, thrust and every
+/// force scale by f (wing loading over dynamic pressure, the trim angles and
+/// the thrust-to-weight stay the 747's); moments of inertia by f·kl². Speeds
+/// (limits, the start, approach) scale by `kv`, the handling's reference
+/// dynamic pressure by kv² and its damping speed by kv, so it pitches, rolls
+/// and yaws at the base type's rates in rad/s (gravity does not scale: with
+/// `kv` > 1 it turns and climbs in wider arcs than the base type scaled).
+/// The landing gear and the hull sink `kl` times as far under f times the
+/// weight at the same damping ratio (springs f/kl, dampers f/√kl). With
+/// `kv` = 1 this is a plain scale model (mass k², inertia k⁴). The function
+/// fields still point at `base`'s: the caller supplies scaled ones (they
+/// cannot carry `kl`), and its own name, keys and id.
+pub fn scaled(base: &Spec, kl: f64, kv: f64) -> Spec {
+    let klf = kl as f32;
+    let f = kv * kv * kl * kl;
+    let ff = f as f32;
+    let (fk, fc, fv) = (f / kl, f / kl.sqrt(), f / kv);
+    let t = &base.tail;
+    let h = &base.hole;
+    let hd = &base.handling;
+    Spec {
+        id: base.id,
+        name: base.name,
+        keys: base.keys,
+        blurb: base.blurb,
+        still: base.still,
+        build: base.build,
+        groups: base.groups.map(|(n, m)| (n, m * ff)),
+        span: base.span * klf,
+        wing_sect: base.wing_sect,
+        fuse: base.fuse,
+        aileron: base.aileron.map(|x| x * klf),
+        tank: base.tank.map(|x| x * klf),
+        tail: Tail {
+            fin_y0: t.fin_y0 * klf,
+            fin_h: t.fin_h * klf,
+            rudder_y0: t.rudder_y0 * klf,
+            rudder_h: t.rudder_h * klf,
+            stab_root: t.stab_root * klf,
+            elev_root: t.elev_root * klf,
+            break_z: t.break_z.map(|z| z * klf),
+            fin_base: t.fin_base * kl,
+            fin_tip: t.fin_tip * kl,
+            stab_tip: t.stab_tip * kl,
+        },
+        eye: base.eye * klf,
+        sees_inside: base.sees_inside,
+        contacts: leak(base.contacts.iter().map(|(p, part)| (p.map(|x| x * kl), *part)).collect()),
+        tail_pts: leak(base.tail_pts.iter().map(|p| p.map(|x| x * kl)).collect()),
+        wing_st: base.wing_st,
+        hard: base.hard.map(|p| p * kl),
+        gear: leak(
+            base.gear
+                .iter()
+                .map(|l| Leg {
+                    at: l.at * kl,
+                    wheel_r: l.wheel_r * kl,
+                    travel: l.travel * kl,
+                    k: l.k * fk,
+                    c: l.c * fc,
+                    nf_max: l.nf_max * f,
+                    side_k: l.side_k * fv,
+                    roll_k: l.roll_k * fv,
+                    brake_k: l.brake_k * fv,
+                    fold_vn: l.fold_vn * kv * kl.sqrt(),
+                    ..l.clone()
+                })
+                .collect(),
+        ),
+        hull: Hull { k: base.hull.k * fk, c: base.hull.c * fc, nf_max: base.hull.nf_max * f, drag: base.hull.drag * fv },
+        hole: Hole {
+            fus: h.fus.map(|x| x * klf),
+            // (the dihedral is a slope)
+            wing: [h.wing[0] * klf, h.wing[1], h.wing[2] * klf, h.wing[3] * klf],
+            stab: h.stab.map(|x| x * klf),
+            fin: h.fin.map(|x| x * klf),
+            pods: h.pods.map(|p| p.map(|x| x * klf)),
+        },
+        mass: base.mass * f,
+        inertia: base.inertia * (f * kl * kl),
+        wing_area: base.wing_area * kl * kl,
+        b: base.b * kl,
+        vfe: leak(base.vfe.iter().map(|v| v * kv).collect()),
+        vne: base.vne * kv,
+        flutter_v: base.flutter_v * kv,
+        steer_fade: base.steer_fade * kv,
+        engine: match &base.engine {
+            Engine::Fan(fe) => Engine::Fan(Fan { thrust: fe.thrust * f, ..fe.clone() }),
+            Engine::Piston(p) => Engine::Piston(Piston {
+                power: p.power * f * kv,
+                prop_d: p.prop_d * kl,
+                prop_i: p.prop_i * f * kl * kl,
+                static_thrust: p.static_thrust * f,
+                fric0: p.fric0 * f,
+                fric1: p.fric1 * f,
+                blade_break_y: p.blade_break_y * klf,
+                ..p.clone()
+            }),
+        },
+        handling: Handling { q_ref: hd.q_ref * kv * kv, damp_v: hd.damp_v * kv, ..hd.clone() },
+        cruise: base.cruise * kv,
+        approach: (base.approach.0 * kv, base.approach.1),
+        cam_dist: base.cam_dist * kl,
+        shadow_r: base.shadow_r * klf,
+        sound: base.sound.clone(),
+        size_k: base.size_k * klf,
+        speed_k: base.speed_k * kv,
+        ..*base
+    }
+}
+
+/// `m` made `k` times its size: every vertex, hinge and slide.
+pub fn scale_model(mut m: Model, k: f32) -> Model {
+    let grow = |mesh: &mut crate::airframe::Mesh| {
+        for v in &mut mesh.v {
+            v.pos = v.pos.map(|x| x * k);
+        }
+    };
+    for p in &mut m.pieces {
+        grow(&mut p.mesh);
+        p.pivot *= k;
+        if let Anim::Move(mo) = &mut p.anim {
+            mo.slide.gain *= k;
+            mo.slide.offset *= k;
+        }
+    }
+    m.groups.iter_mut().for_each(grow);
+    m
 }
 
 impl std::fmt::Debug for Spec {

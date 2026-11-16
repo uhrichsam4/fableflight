@@ -221,6 +221,14 @@ impl Sources {
         Ok(image::load_from_memory(&data)?.to_rgba8())
     }
 
+    /// Place names and borders to lay over the imagery (transparent PNG,
+    /// Esri's reference layer that matches the default imagery).
+    pub fn labels(&self, id: TileId) -> Result<image::RgbaImage> {
+        let url = format!("https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{}/{}/{}", id.z, id.y, id.x);
+        let data = self.fetch.get_cached(&format!("lbl/{}/{}/{}.png", id.z, id.x, id.y), &url)?;
+        Ok(image::load_from_memory(&data)?.to_rgba8())
+    }
+
     /// Elevation as the data has it.
     pub fn elev_raw(&self, id: TileId) -> Result<Arc<ElevTile>> {
         if let Some(t) = self.raw.lock().get(id) {

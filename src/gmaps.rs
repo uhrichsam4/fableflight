@@ -159,7 +159,7 @@ impl Google {
     /// The saved settings and counts. `key` (from the command line or the
     /// environment) replaces the saved key when given.
     pub fn load(key: Option<String>) -> Self {
-        let path = dirs::config_dir().map(|d| d.join("fablegame").join("google_maps.json"));
+        let path = crate::settings::config_dir().map(|d| d.join("google_maps.json"));
         let j: serde_json::Value = path.as_ref().and_then(|p| std::fs::read(p).ok()).and_then(|d| serde_json::from_slice(&d).ok()).unwrap_or_default();
         let n = |k: &str| j[k].as_u64().unwrap_or(0);
         let mut u = Usage { month: j["month"].as_str().unwrap_or("").to_string(), month_requests: n("month_requests"), month_bytes: n("month_bytes"), total_requests: n("total_requests"), total_bytes: n("total_bytes"), month_roots: n("month_roots"), total_roots: n("total_roots"), ..Default::default() };

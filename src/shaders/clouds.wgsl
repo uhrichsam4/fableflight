@@ -126,6 +126,9 @@ fn alto_march(oc: vec3f, rd: vec3f, t0: f32, t1: f32, a: f32, jit: f32, cs: f32,
 struct CloudOut { @location(0) col: vec4f, @location(1) dist: vec2f };
 
 const SKY_KM = 10000.0;  // scene distance stored for sky texels
+// Scene pixels per cloud texel, along each axis: 2 at High cloud quality, 4
+// below it (G.start.y, render.rs Renderer::set_clouds).
+fn cloud_div() -> i32 { return select(4, 2, G.start.y > 1.5); }
 // How well two scene distances agree, 1 = same surface.
 fn depth_match(a: f32, b: f32) -> f32 {
   let rel = abs(a - b) / max(max(a, b), 1e-6);
@@ -136,14 +139,17 @@ fn depth_match(a: f32, b: f32) -> f32 {
   var o = CloudOut(vec4f(0.0, 0.0, 0.0, 1.0), vec2f(0.0));
   let ray = view_ray(in.uv);
   let rd = normalize(ray);
-  // Each texel covers 2x2 scene pixels. Alternate texels march to the nearest and the
+  // Each texel covers 2x2 scene pixels (4x4 below High quality: its corners stand
+  // in for it). Alternate texels march to the nearest and the
   // farthest of them (reverse Z: larger = nearer), so at a silhouette both surfaces
   // are represented in every 2x2 texel neighbourhood and the upsample can pick the
   // matching one instead of smearing cloud over the plane or clear sky around it.
   let hp = vec2i(in.pos.xy);
-  let q = hp * 2;
-  let z4 = vec4f(textureLoad(t_depth, q, 0), textureLoad(t_depth, q + vec2i(1, 0), 0),
-                 textureLoad(t_depth, q + vec2i(0, 1), 0), textureLoad(t_depth, q + vec2i(1, 1), 0));
+  let k = cloud_div();
+  let q = hp * k;
+  let e = k - 1;
+  let z4 = vec4f(textureLoad(t_depth, q, 0), textureLoad(t_depth, q + vec2i(e, 0), 0),
+                 textureLoad(t_depth, q + vec2i(0, e), 0), textureLoad(t_depth, q + vec2i(e, e), 0));
   var z = min(min(z4.x, z4.y), min(z4.z, z4.w));
   if (((hp.x + hp.y) & 1) == 0) { z = max(max(z4.x, z4.y), max(z4.z, z4.w)); }
   var tscene = 1e9;
@@ -213,11 +219,17 @@ fn depth_match(a: f32, b: f32) -> f32 {
 
   if (march) {
     // Steps grow with distance (a pixel covers more ground further out), and
-    // stretch while the ray is in clear air.
+    // stretch while the ray is in clear air. Lower cloud quality (G.start.y):
+    // Medium takes 1.5x longer steps, at most 120; Low twice as long, at most
+    // 80, and no fine erosion octave.
+    let lq = G.start.y < 0.5;
+    let mq = G.start.y < 1.5;
+    let n_max = select(select(200, 120, mq), 80, lq);
+    let stride = select(select(1.0, 1.5, mq), 2.0, lq);
     var t = ta;
     var clear = 0.0;
-    for (var i = 0; i < 200; i++) {
-      let dt = clamp(t * 0.016, 40.0, 2500.0) * (1.0 + clear);
+    for (var i = 0; i < n_max; i++) {
+      let dt = clamp(t * 0.016, 40.0, 2500.0) * stride * (1.0 + clear);
       let ts = t + dt * jit;
       t += dt;
       if (alto_on && ts > atm_) {
@@ -236,7 +248,7 @@ fn depth_match(a: f32, b: f32) -> f32 {
       let h = r - rg;
       let wx = cloud_weather_m(p, smask);
       // The close-up erosion octave only pays off within a few km.
-      let fine = 1.0 - smoothstep(1500.0, 4500.0, ts);
+      let fine = select(1.0 - smoothstep(1500.0, 4500.0, ts), 0.0, lq);
       let d = cloud_shape_f(p, h, wx, true, fine);
       // Stride faster through the empty storm-only air above the ordinary layer.
       if (d <= 0.002) { clear = min(clear + 0.2, select(1.0, 3.0, h > base + G.cloud.z && wx.cb <= 0.0)); continue; }
@@ -413,7 +425,7 @@ fn depth_match(a: f32, b: f32) -> f32 {
 @group(1) @binding(5) var t_color: texture_2d<f32>;
 fn cloud_at(pos: vec2f, d: f32) -> vec4f {
   let dims = vec2i(textureDimensions(t_cloud));
-  let f = pos * 0.5 - 0.5;
+  let f = pos / f32(cloud_div()) - 0.5;
   let b = vec2i(floor(f));
   let fr = f - floor(f);
   var acc = vec4f(0.0);

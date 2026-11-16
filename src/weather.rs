@@ -14,6 +14,9 @@ pub struct Weather {
     pub storms: f32,
     /// how much mid-level cloud (altocumulus, thickening into altostratus), 0..1
     pub alto: f32,
+    /// snow, 0..1: lying on what faces up (more of it higher up), and
+    /// falling while the sky is overcast (see `snowfall`)
+    pub snow: f32,
     /// aerosol haze, as a multiple of a clear day's
     pub haze: f32,
     /// wind 10 m above the ground, m/s, and the compass direction it blows from
@@ -126,7 +129,7 @@ fn cube_face(q: DVec3) -> (u32, DVec3, DVec3, DVec3) {
 impl Weather {
     pub fn new(clouds: f32) -> Self {
         // A light west-south-westerly, as the smoke always drifted before there was a slider for it.
-        Self { clouds, cloud_base: 1500.0, cloud_depth: 4500.0, storms: 0.2, alto: 0.25, haze: 1.0, wind: 4.0, wind_from: 248.0, gusts: 0.15, time_rate: 1.0, moon_age: 11.5, cloud_off: DVec3::ZERO, open: false, sun: 0.5, thermal_off: DVec3::ZERO, cells: Vec::new(), live: false, live_station: String::new(), live_raw: String::new(), real_time: false }
+        Self { clouds, cloud_base: 1500.0, cloud_depth: 4500.0, storms: 0.2, alto: 0.25, snow: 0.0, haze: 1.0, wind: 4.0, wind_from: 248.0, gusts: 0.15, time_rate: 1.0, moon_age: 11.5, cloud_off: DVec3::ZERO, open: false, sun: 0.5, thermal_off: DVec3::ZERO, cells: Vec::new(), live: false, live_station: String::new(), live_raw: String::new(), real_time: false }
     }
 
     /// Top of the cloud layer including any storm towers, metres.
@@ -434,6 +437,13 @@ impl Weather {
         });
     }
 
+    /// How hard it is snowing, 0..1: snow with an overcast sky, below the
+    /// clouds (and a little way into them).
+    pub fn snowfall(&self, alt: f64) -> f32 {
+        let below = ((self.cloud_base as f64 + 300.0 - alt) / 300.0).clamp(0.0, 1.0) as f32;
+        self.snow * ((self.clouds - 0.4) / 0.4).clamp(0.0, 1.0) * below
+    }
+
     /// A few words for the weather: the preset it matches, else the cloud
     /// cover and wind.
     pub fn summary(&self) -> String {
@@ -490,6 +500,9 @@ impl Weather {
             ui.end_row();
             ui.label(t!("Mid-level cloud", "Nuages moyens"));
             add(ui, Slider::new(&mut self.alto, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+            ui.end_row();
+            ui.label(t!("Snow", "Neige"));
+            add(ui, Slider::new(&mut self.snow, 0.0..=1.0).custom_formatter(|v, _| if v <= 0.0 { t!("none", "aucune").to_string() } else { format!("{:.0}%", v * 100.0) }));
             ui.end_row();
             ui.label(t!("Haze", "Brume"));
             add(ui, Slider::new(&mut self.haze, 0.2..=40.0).logarithmic(true).custom_formatter(|v, _| format!("{v:.1}×")));

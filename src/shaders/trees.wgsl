@@ -202,7 +202,8 @@ fn sun_depth(P: vec3f) -> f32 {
 // a little light through, filtered green, and a leaf lit from behind glows.
 // `ao` is openness to the sky, `dense` (0..1) how tightly packed the foliage
 // is here.
-fn foliage(P: vec3f, N: vec3f, V: vec3f, albedo: vec3f, ao: f32, dense: f32, l: Light, sh: f32, glint: f32) -> vec3f {
+fn foliage(P: vec3f, N: vec3f, V: vec3f, albedo_in: vec3f, ao: f32, dense: f32, l: Light, sh: f32, glint: f32) -> vec3f {
+  let albedo = with_snow(albedo_in, P, N);
   let sun = G.sun_dir.xyz;
   let ndl = dot(N, sun);
   // Sunlight that has come through the crown instead of straight from the

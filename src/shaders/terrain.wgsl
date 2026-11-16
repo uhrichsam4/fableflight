@@ -764,6 +764,7 @@ fn relief(P: vec3f, N: vec3f, uv: vec2f, sp: f32) -> f32 {
     let soil = mix(vec3f(0.11, 0.085, 0.06), vec3f(0.19, 0.17, 0.15), smoothstep(0.4, 0.65, rk)) * (0.6 + 0.8 * rk2);
     albedo = mix(albedo, soil, clamp(abs(cr.w) * 1.6 + length(cr.xyz) * 1.5, 0.0, 1.0));
   }
+  albedo = with_snow(albedo, in.P, N);
   let c = shade(in.P, N, albedo);
   return GOut(vec4f(c, 1.0), vec4f(N, 0.0), amb_share(c));
 }

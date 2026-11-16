@@ -175,6 +175,8 @@ pub static SPEC: Spec = Spec {
     cam_dist: 16.0,
     shadow_r: 6.2,
     sound: Sound::Piston,
+    size_k: 1.0,
+    speed_k: 1.0,
 };
 
 // ---------------------------------------------------------------- fuselage

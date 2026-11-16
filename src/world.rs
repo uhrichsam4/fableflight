@@ -1368,6 +1368,7 @@ impl World {
                 view: *view,
                 near: dist < 3000.0,
                 far: if o.length() + (b.radius as f32) < buildings::BFAR[0] { 0 } else if reach[0] == 0 { 2 } else { 1 },
+                reach_m: o.length() + b.radius as f32,
                 reach,
                 casc: mask,
                 trees: tb.take(),

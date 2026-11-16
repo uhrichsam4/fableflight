@@ -60,9 +60,12 @@ const AGX_EXPOSURE = 1.6;
 fn finish(scene: vec3f, in: FsIn) -> vec4f {
   let uv = in.uv;
   var c = scene;
-  let bloom = textureSampleLevel(t_bloom, s_clamp, uv, 0.0).rgb;
-  // Lights bloom more at night, when the eye is dark-adapted.
-  c = mix(c, bloom, mix(0.055, 0.13, smoothstep(1.0, 9.0, G.time.z)));
+  // Lights bloom more at night, when the eye is dark-adapted. (Bloom off in
+  // the Graphics settings: G.start.z = 1, and the bloom texture is not drawn.)
+  if (G.start.z < 0.5) {
+    let bloom = textureSampleLevel(t_bloom, s_clamp, uv, 0.0).rgb;
+    c = mix(c, bloom, mix(0.055, 0.13, smoothstep(1.0, 9.0, G.time.z)));
+  }
   c *= G.time.z;
   // Gentle vignette.
   let q = in.uv - 0.5;
@@ -100,6 +103,20 @@ const UP_SHARPEN = 0.5;
   let w = textureSampleLevel(t_src, s_clamp, in.uv + vec2f(-tx.x, 0.0), 0.0).rgb;
   let e = textureSampleLevel(t_src, s_clamp, in.uv + vec2f(tx.x, 0.0), 0.0).rgb;
   return finish(sharpen(c.rgb, n, s, w, e, max(TAA_SHARPEN * c.a, UP_SHARPEN)), in);
+}
+// After temporal upscaling (taa.wgsl fs_taa_up): the history is already at
+// the window's resolution, softened a little by the upscale; sharpen it
+// everywhere, more where it moves (the same halo-free limit as above).
+const TAAU_SHARPEN = 0.45;
+@fragment fn fs_final_taau(in: FsIn) -> @location(0) vec4f {
+  let px = vec2i(in.pos.xy);
+  let dmax = vec2i(textureDimensions(t_src)) - 1;
+  let c = textureLoad(t_src, px, 0);
+  let n = textureLoad(t_src, clamp(px + vec2i(0, -1), vec2i(0), dmax), 0).rgb;
+  let s = textureLoad(t_src, clamp(px + vec2i(0, 1), vec2i(0), dmax), 0).rgb;
+  let w = textureLoad(t_src, clamp(px + vec2i(-1, 0), vec2i(0), dmax), 0).rgb;
+  let e = textureLoad(t_src, clamp(px + vec2i(1, 0), vec2i(0), dmax), 0).rgb;
+  return finish(sharpen(c.rgb, n, s, w, e, max(TAA_SHARPEN * c.a, TAAU_SHARPEN)), in);
 }
 fn sharpen(c: vec3f, n: vec3f, s: vec3f, w: vec3f, e: vec3f, k: f32) -> vec3f {
   let lo = min(min(min(n, s), min(w, e)), c);

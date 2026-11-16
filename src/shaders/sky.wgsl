@@ -83,7 +83,7 @@ fn sky_color(rd: vec3f, jit: f32) -> vec3f {
   let sun = G.sun_dir.xyz;
   // Fresh jitter every frame: cloud shadows cross the march (light shafts), and the
   // temporal AA smooths what the steps miss.
-  let sc = sky_march(rd, 24, fract(jit + G.time.w * 0.618034));
+  let sc = sky_march(rd, atm_steps(24), fract(jit + G.time.w * 0.618034));
   var col = sc.L;
   let gnd = ray_sphere(oc, rd, G.planet.w);
   if (gnd.x > 0.0) {

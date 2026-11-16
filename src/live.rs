@@ -61,7 +61,7 @@ pub struct Plane {
     livery: (u8, u8),
     /// where it is drawn now, and its nose direction (smoothed)
     pub pos: DVec3,
-    fwd: DVec3,
+    pub fwd: DVec3,
     pub alt_ft: f64,
     pub gs_kt: f64,
     pub vs_fpm: f64,
