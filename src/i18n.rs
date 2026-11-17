@@ -234,6 +234,8 @@ fn fr(en: &str) -> Option<&'static str> {
         // ---- aircraft
         "Twin-engine carrier fighter, 15.5 t. Fly-by-wire holds it to 7.5 g; Space for afterburner, / speedbrake. 135 kt approach." => "Chasseur embarqué biréacteur, 15,5 t. Les commandes de vol électriques le limitent à 7,5 g ; Espace pour la postcombustion, / aérofreins. Approche à 135 kt.",
         "Four-seat single, 180 hp, retractable gear. Forgiving and slow: 125 kt flat out." => "Monomoteur quatre places, 180 ch, train rentrant. Indulgent et lent : 125 kt à fond.",
+        "Speedboat" => "Bateau à moteur",
+        "7.4 m centre-console runabout, 300 hp outboard. W/S throttle and reverse, A/D steer, Shift for the last few knots: about 40 kt flat out." => "Open de 7,4 m à console centrale, hors-bord de 300 ch. W/S gaz et marche arrière, A/D barre, Maj pour les derniers nœuds : environ 40 nœuds à fond.",
         "Four-engine wide-body airliner, 290 t. Heavy and slow to answer the controls; Mach 0.85 cruise, 150 kt approach. / speedbrake, Z reversers." => "Quadriréacteur gros-porteur, 290 t. Lourd et lent à répondre aux commandes ; croisière à Mach 0,85, approche à 150 kt. / aérofreins, Z inverseurs.",
         "The 747-400 at five times its size: 353 m long, 322 m across, 7,250 t. Same speeds and handling as the 747. / speedbrake, Z reversers." => "Le 747-400 cinq fois plus grand : 353 m de long, 322 m d'envergure, 7 250 t. Mêmes vitesses et même pilotage que le 747. / aérofreins, Z inverseurs.",
 

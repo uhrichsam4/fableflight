@@ -13,9 +13,10 @@
 //! (ocean near the shore), lakes and rivers lose the long waves and keep the
 //! short chop.
 //!
-//! The CPU keeps its own copy of the largest cascade (the only one that
-//! matters for floating), the same spectrum from the same random numbers, so a
-//! ditched aircraft rides the waves that are drawn (`Ocean::height`).
+//! The CPU keeps its own copy of the two longer cascades (what matters for
+//! floating: the 6 m one is finer than any hull), the same spectrum from the
+//! same random numbers, so a ditched aircraft or the boat rides the waves that
+//! are drawn (`Ocean::height_w`).
 use bytemuck::{Pod, Zeroable};
 use glam::{DVec2, DVec3};
 use std::f64::consts::PI;
@@ -45,8 +46,10 @@ const GRAV: f64 = 9.81;
 const FETCH: f64 = 200_000.0;
 /// Wavelength of the long swell (m).
 const SWELL_L: f64 = 150.0;
-/// Resolution of the CPU copy of cascade 0 (holds all of its band).
+/// Resolution of the CPU copy of cascades 0 and 1 (holds all of their bands).
 const M: usize = 64;
+/// Cascades kept on the CPU.
+const CPU_C: usize = 2;
 
 /// ocean.wgsl `OU`.
 #[repr(C)]
@@ -216,10 +219,10 @@ pub struct Ocean {
     dt: f64,
     /// time (s), wrapped at PERIOD
     t: f64,
-    /// cascade 0's random numbers
+    /// the random numbers of the cascades kept on the CPU, one after the other
     noise0: Vec<[f32; 2]>,
-    /// cascade 0 on an M x M grid: Dx, Dy, height
-    field: Vec<[f32; 3]>,
+    /// those cascades on an M x M grid each: Dx, Dy, height
+    field: [Vec<[f32; 3]>; CPU_C],
     /// this frame's camera, its east and north, and the ocean's coordinates of it
     cam: DVec3,
     east: DVec3,
@@ -245,7 +248,7 @@ impl Default for Ocean {
 impl Ocean {
     pub fn new() -> Self {
         let mut noise0 = noise(N);
-        noise0.truncate(N * N);
+        noise0.truncate(CPU_C * N * N);
         let dir = DVec2::new(1.0, 0.0);
         Self {
             n: N,
@@ -257,7 +260,7 @@ impl Ocean {
             dt: 0.0,
             t: 0.0,
             noise0,
-            field: vec![[0.0; 3]; M * M],
+            field: std::array::from_fn(|_| vec![[0.0; 3]; M * M]),
             cam: DVec3::ZERO,
             east: DVec3::X,
             north: DVec3::Y,
@@ -276,7 +279,7 @@ impl Ocean {
         if n != self.n {
             self.n = n;
             self.noise0 = noise(n);
-            self.noise0.truncate(n * n);
+            self.noise0.truncate(CPU_C * n * n);
             self.lost_for = [f64::NAN; 6];
         }
     }
@@ -324,7 +327,9 @@ impl Ocean {
             self.lost_for = key;
             self.lost_slopes();
         }
-        self.cpu_field();
+        for c in 0..CPU_C {
+            self.cpu_field(c);
+        }
     }
 
     /// Significant wave height, integrated over the cascades' bands.
@@ -440,15 +445,17 @@ impl Ocean {
         self.ripple = [rp[0] as f32, rp[1] as f32, rp[2] as f32, 0.0];
     }
 
-    /// Cascade 0 on the CPU grid, from the same spectrum and noise as the GPU.
-    fn cpu_field(&mut self) {
-        let l = SIZES[0];
+    /// Cascade `c`'s waves at this time, as ocean.wgsl `spectrum` has them
+    /// (the modes the CPU grid holds): grid cell, wave vector and complex
+    /// amplitude h0(k) e^(iwt) + conj(h0(-k)) e^(-iwt).
+    fn modes(&self, c: usize) -> Vec<(usize, DVec2, [f64; 2])> {
+        let l = SIZES[c];
         let dk = 2.0 * PI / l;
-        let (klo, khi) = band(0);
+        let (klo, khi) = band(c);
+        let base = c * self.n * self.n;
         let wq = 2.0 * PI / PERIOD;
-        let mut fd = vec![[0f64; 2]; M * M];
-        let mut fh = vec![[0f64; 2]; M * M];
         let h = M as i64 / 2;
+        let mut out = Vec::new();
         for cy in 0..M {
             for cx in 0..M {
                 let n = (cx as i64 - h, cy as i64 - h);
@@ -459,24 +466,34 @@ impl Ocean {
                 }
                 let (gx, gy) = ((n.0 + self.n as i64 / 2) as usize, (n.1 + self.n as i64 / 2) as usize);
                 let a = dk * 0.5f64.sqrt();
-                let np = self.noise0[gy * self.n + gx];
-                let nm = self.noise0[((self.n - gy) % self.n) * self.n + ((self.n - gx) % self.n)];
+                let np = self.noise0[base + gy * self.n + gx];
+                let nm = self.noise0[base + ((self.n - gy) % self.n) * self.n + ((self.n - gx) % self.n)];
                 let ap = self.spec.energy(kv, k).sqrt() * a;
                 let am = self.spec.energy(-kv, k).sqrt() * a;
                 let w = ((GRAV * k * (1.0 + k * k / 136900.0)).sqrt() / wq).floor() * wq;
-                let (s, c) = (w * self.t).sin_cos();
-                // h0(k) e^(iwt) + conj(h0(-k)) e^(-iwt)
+                let (sn, cs) = (w * self.t).sin_cos();
                 let hp = [np[0] as f64 * ap, np[1] as f64 * ap];
                 let hm = [nm[0] as f64 * am, -(nm[1] as f64) * am];
-                let hr = hp[0] * c - hp[1] * s + hm[0] * c + hm[1] * s;
-                let hi = hp[0] * s + hp[1] * c - hm[0] * s + hm[1] * c;
-                // i k/|k| h for the displacement, packed as Dx + i Dy.
-                let (ix, iy) = (kv.x / k, kv.y / k);
-                let dx = [-hi * ix, hr * ix];
-                let dy = [-hi * iy, hr * iy];
-                fd[cy * M + cx] = [dx[0] - dy[1], dx[1] + dy[0]];
-                fh[cy * M + cx] = [hr, hi];
+                let hr = hp[0] * cs - hp[1] * sn + hm[0] * cs + hm[1] * sn;
+                let hi = hp[0] * sn + hp[1] * cs - hm[0] * sn + hm[1] * cs;
+                out.push((cy * M + cx, kv, [hr, hi]));
             }
+        }
+        out
+    }
+
+    /// Cascade `c` on the CPU grid, from the same spectrum and noise as the GPU.
+    fn cpu_field(&mut self, c: usize) {
+        let mut fd = vec![[0f64; 2]; M * M];
+        let mut fh = vec![[0f64; 2]; M * M];
+        for (i, kv, [hr, hi]) in self.modes(c) {
+            // i k/|k| h for the displacement, packed as Dx + i Dy.
+            let k = kv.length();
+            let (ix, iy) = (kv.x / k, kv.y / k);
+            let dx = [-hi * ix, hr * ix];
+            let dy = [-hi * iy, hr * iy];
+            fd[i] = [dx[0] - dy[1], dx[1] + dy[0]];
+            fh[i] = [hr, hi];
         }
         for f in [&mut fd, &mut fh] {
             for r in f.chunks_mut(M) {
@@ -497,19 +514,20 @@ impl Ocean {
             for x in 0..M {
                 let sg = if (x + y) & 1 == 1 { -1.0 } else { 1.0 };
                 let d = fd[y * M + x];
-                self.field[y * M + x] = [(d[0] * sg * CHOP[0]) as f32, (d[1] * sg * CHOP[0]) as f32, (fh[y * M + x][0] * sg) as f32];
+                self.field[c][y * M + x] = [(d[0] * sg * CHOP[c]) as f32, (d[1] * sg * CHOP[c]) as f32, (fh[y * M + x][0] * sg) as f32];
             }
         }
     }
 
-    /// Cascade 0 at ocean coordinates `p` (m), bilinear, sampled as the GPU's
-    /// texture is (its texel centres sit half a texel off the grid).
-    fn sample(&self, p: DVec2) -> [f64; 3] {
-        let s = M as f64 / SIZES[0];
-        let u = (p - DVec2::splat(SIZES[0] / (2.0 * self.n as f64))) * s;
+    /// Cascade `c` at ocean coordinates `p` (m), bilinear, sampled as the
+    /// GPU's texture is (its texel centres sit half a texel off the grid).
+    fn sample(&self, c: usize, p: DVec2) -> [f64; 3] {
+        let s = M as f64 / SIZES[c];
+        let u = (p - DVec2::splat(SIZES[c] / (2.0 * self.n as f64))) * s;
         let (x0, y0) = (u.x.floor(), u.y.floor());
         let (fx, fy) = (u.x - x0, u.y - y0);
-        let at = |i: f64, j: f64| self.field[(j.rem_euclid(M as f64) as usize % M) * M + (i.rem_euclid(M as f64) as usize % M)];
+        let f = &self.field[c];
+        let at = |i: f64, j: f64| f[(j.rem_euclid(M as f64) as usize % M) * M + (i.rem_euclid(M as f64) as usize % M)];
         let (a, b, c, d) = (at(x0, y0), at(x0 + 1.0, y0), at(x0, y0 + 1.0), at(x0 + 1.0, y0 + 1.0));
         let mut o = [0.0; 3];
         for i in 0..3 {
@@ -518,20 +536,55 @@ impl Ocean {
         o
     }
 
-    /// Height of the long waves (cascade 0, at full strength) at a point:
-    /// the surface point above it, found through the sideways displacement.
-    pub fn height(&self, p: DVec3) -> f64 {
+    /// Height of the sea surface at a point, with `w` of each of the two
+    /// longer cascades (common.wgsl `sea_state`): what the GPU draws there
+    /// (terrain.wgsl `vs_water`, but for the 6 m chop): the surface point
+    /// above it, found through the sideways displacement.
+    pub fn height_w(&self, p: DVec3, w: [f64; 2]) -> f64 {
         if !self.started {
             return 0.0;
         }
-        let v = p - self.cam;
-        let x = DVec2::new(v.dot(self.east), v.dot(self.north)) + self.off;
+        let x = self.coord(p);
+        let disp = |x0: DVec2| {
+            let mut o = [0.0; 3];
+            for (c, wc) in w.iter().enumerate() {
+                if *wc > 0.0 {
+                    let d = self.sample(c, x0);
+                    for i in 0..3 {
+                        o[i] += d[i] * wc;
+                    }
+                }
+            }
+            o
+        };
         let mut x0 = x;
-        for _ in 0..4 {
-            let d = self.sample(x0);
+        for _ in 0..5 {
+            let d = disp(x0);
             x0 = x - DVec2::new(d[0], d[1]);
         }
-        self.sample(x0)[2]
+        disp(x0)[2]
+    }
+
+    /// The ocean's coordinates (common.wgsl `ocean_coord`) of a point.
+    fn coord(&self, p: DVec3) -> DVec2 {
+        let v = p - self.cam;
+        DVec2::new(v.dot(self.east), v.dot(self.north)) + self.off
+    }
+
+    /// Sideways shift and height (m) of the sea surface point that starts out
+    /// above ocean coordinates of `p` (no search: the raw displacement field),
+    /// with `w` of each cascade. For tests against the GPU's `ocean_disp`.
+    #[cfg(test)]
+    pub fn displacement(&self, p: DVec3, w: [f64; 2]) -> [f64; 3] {
+        let x = self.coord(p);
+        let mut o = [0.0; 3];
+        for (c, wc) in w.iter().enumerate() {
+            let d = self.sample(c, x);
+            for i in 0..3 {
+                o[i] += d[i] * wc;
+            }
+        }
+        o
     }
 
     /// The GPU's constants for this frame.
@@ -573,10 +626,6 @@ impl Ocean {
     }
 }
 
-/// Cascade-0 weight of the water at a point (common.wgsl `sea_state`, x).
-pub fn sea_weight(wclass: f32, sinlat: f32, shore: f32) -> f32 {
-    sea_state(wclass, sinlat, shore)[0]
-}
 /// common.wgsl `sea_state`: how much of each cascade a stretch of water shows.
 pub fn sea_state(wclass: f32, sinlat: f32, shore: f32) -> [f32; 3] {
     let ss = |a: f32, b: f32, x: f32| {
@@ -760,15 +809,51 @@ mod tests {
                 let k = lo + (hi - lo) * (i as f64 + 0.5) / steps as f64;
                 m0 += o.spec.omni(k) * (hi - lo) / steps as f64;
             }
-            let var = o.field.iter().map(|f| (f[2] as f64).powi(2)).sum::<f64>() / o.field.len() as f64;
-            let hmax = o.field.iter().map(|f| f[2].abs()).fold(0.0, f32::max);
+            let var = o.field[0].iter().map(|f| (f[2] as f64).powi(2)).sum::<f64>() / o.field[0].len() as f64;
+            let hmax = o.field[0].iter().map(|f| f[2].abs()).fold(0.0, f32::max);
             eprintln!("wind {wind}: Hs {:.2} m, long-wave rms {:.2} m (band {:.2}), max {hmax:.2}", o.hs, var.sqrt(), m0.sqrt());
             assert!(o.hs > last);
             assert!(var > m0 * 0.3 && var < m0 * 3.0);
             last = o.hs;
             // Floating: the height found through the displacement stays near the field's.
-            let h = o.height(DVec3::new(10.0, 20.0, 0.0));
+            let h = o.height_w(DVec3::new(10.0, 20.0, 0.0), [1.0, 0.0]);
             assert!(h.abs() < 4.0 * m0.sqrt() + 0.5);
+        }
+    }
+
+    /// The CPU copy of the two longer cascades is the sum of their waves
+    /// (as the GPU's FFT is), and the height found through the sideways
+    /// shift is that of the surface point carried there.
+    #[test]
+    fn cpu_field_matches_waves() {
+        let mut o = Ocean::new();
+        o.update(0.0, 37.0, 12.0, 250.0, 0.6, DVec3::ZERO, DVec3::X, DVec3::Y, DVec2::ZERO);
+        for c in 0..CPU_C {
+            let modes = o.modes(c);
+            let rms = (o.field[c].iter().map(|f| (f[2] as f64).powi(2)).sum::<f64>() / (M * M) as f64).sqrt();
+            assert!(rms > 0.01, "cascade {c} empty");
+            for (x, y) in [(0, 0), (5, 17), (33, 2), (63, 41)] {
+                let p = DVec2::new(x as f64, y as f64) * (SIZES[c] / M as f64);
+                let (mut h, mut dx) = (0.0, 0.0);
+                for (_, kv, [hr, hi]) in &modes {
+                    let (sn, cs) = kv.dot(p).sin_cos();
+                    h += hr * cs - hi * sn;
+                    // i k/|k| h, real part
+                    dx += -(hr * sn + hi * cs) * kv.x / kv.length();
+                }
+                let f = o.field[c][y * M + x];
+                assert!((f[2] as f64 - h).abs() < 1e-3 * rms.max(1.0), "cascade {c} ({x}, {y}): grid {} sum {h}", f[2]);
+                assert!((f[0] as f64 - dx * CHOP[c]).abs() < 1e-3 * rms.max(1.0), "cascade {c} ({x}, {y}): dx {} sum {}", f[0], dx * CHOP[c]);
+            }
+        }
+        // Floating: wherever a surface point is carried, height_w finds it.
+        let w = [1.0, 0.8];
+        for (x, y) in [(3.0, 4.0), (-71.5, 12.25), (140.0, -33.0)] {
+            let p0 = DVec3::new(x, y, 0.0);
+            let d = o.displacement(p0, w);
+            let p = p0 + DVec3::new(d[0], d[1], 0.0);
+            let h = o.height_w(p, w);
+            assert!((h - d[2]).abs() < 0.05, "at {p0}: {h} vs {}", d[2]);
         }
     }
 

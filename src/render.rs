@@ -154,7 +154,12 @@ pub struct Globals {
     /// falling snow: xyz the direction the flakes stream from (camera
     /// motion through them), w metres moved through them (wrapped)
     pub snow: [f32; 4],
+    /// the boat's wake (boat.rs `Boat::wake_rows`): count, then two rows a
+    /// track point, newest first
+    pub wake: [[f32; 4]; WAKE_ROWS],
 }
+/// Rows of `Globals::wake`.
+pub const WAKE_ROWS: usize = 1 + 2 * 24;
 
 /// The cloud shadow map: the sun's view of the cloud layer (common.wgsl
 /// `cloud_sun`). Each texel is a ray along the sun from a point on the cloud
@@ -877,6 +882,10 @@ pub struct Renderer {
     /// [with the 3D tiles zone's discard, without (common.wgsl PHOTO)][MSAA, not]
     p_terrain: [[wgpu::RenderPipeline; 2]; 2],
     p_terrain_tess: [[wgpu::RenderPipeline; 2]; 2],
+    /// a tile's water as its own fine grid (Water High), and the grids' index
+    /// buffers by `WATER_GRIDS`
+    p_water: [wgpu::RenderPipeline; 2],
+    water_ibuf: [(wgpu::Buffer, u32); 2],
     p_terrain_cells: [[wgpu::RenderPipeline; 2]; 2],
     /// index buffers of a tessellated cell patch and of a single cell quad
     tess_ibuf: wgpu::Buffer,
@@ -1085,6 +1094,39 @@ fn paint_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureVie
 /// for good, every later upload crawled: ~1 fps over cities. Small blocks
 /// keep BAR1 use close to what is in flight (see also world::UPLOAD_BUDGET).
 const MEMORY_HINTS: wgpu::MemoryHints = wgpu::MemoryHints::Manual { suballocated_device_memory_block_size: (32 << 20)..(64 << 20) };
+
+/// Vertices per side of the fine water grids (terrain.wgsl `vs_water`): a
+/// tile's uniform asks for one of these in `info.y` (world.rs `draw_lists`).
+pub const WATER_GRIDS: [u32; 2] = [128, 256];
+/// Triangles of a water grid of n x n quads (split along the same diagonal as
+/// the terrain's cells), then the skirt around its border: the 4n border
+/// vertices (bottom, right, top, left) repeated after the (n + 1)^2 grid.
+fn water_indices(n: u32) -> Vec<u32> {
+    let row = n + 1;
+    let mut v = Vec::with_capacity((n * n * 6 + n * 24) as usize);
+    for b in 0..n {
+        for a in 0..n {
+            let (p00, p10, p01, p11) = (b * row + a, b * row + a + 1, (b + 1) * row + a, (b + 1) * row + a + 1);
+            v.extend([p00, p01, p10, p10, p01, p11]);
+        }
+    }
+    let border = |r: u32| {
+        let (side, o) = ((r / n) % 4, r % n);
+        let (i, j) = match side {
+            0 => (o, 0),
+            1 => (n, o),
+            2 => (n - o, n),
+            _ => (0, n - o),
+        };
+        j * row + i
+    };
+    for r in 0..4 * n {
+        let r1 = (r + 1) % (4 * n);
+        let (a, b, sa, sb) = (border(r), border(r1), row * row + r, row * row + r1);
+        v.extend([a, b, sa, sa, b, sb]);
+    }
+    v
+}
 
 /// Sub-cells per side of a tessellated terrain cell (TN in terrain.wgsl).
 const TESS_N: u16 = 16;
@@ -1721,9 +1763,10 @@ impl Renderer {
                     11 => "vs_skin",
                     8 => "vs_tess",
                     9 => "vs_cells",
+                    14 => "vs_water",
                     _ => "vs",
                 }), compilation_options: Default::default(), buffers },
-                primitive: wgpu::PrimitiveState { cull_mode: if mode >= 12 { Some(wgpu::Face::Front) } else { None }, ..Default::default() },
+                primitive: wgpu::PrimitiveState { cull_mode: if mode == 12 || mode == 13 { Some(wgpu::Face::Front) } else { None }, ..Default::default() },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: DEPTH,
                     depth_write_enabled: Some(mode != 2),
@@ -1741,7 +1784,7 @@ impl Renderer {
                 } else if shadow {
                     None
                 } else {
-                    Some(wgpu::FragmentState { module: m, entry_point: Some(match mode { 3 => "fs_card", 5 => "fs_solid", 7 => "fs_cut", 11 => "fs_skin", _ => "fs" }), compilation_options: wgpu::PipelineCompilationOptions { constants: consts, ..Default::default() }, targets: &targets })
+                    Some(wgpu::FragmentState { module: m, entry_point: Some(match mode { 3 => "fs_card", 5 => "fs_solid", 7 => "fs_cut", 11 => "fs_skin", 14 => "fs_water", _ => "fs" }), compilation_options: wgpu::PipelineCompilationOptions { constants: consts, ..Default::default() }, targets: &targets })
                 },
                 multiview_mask: None,
                 cache: None,
@@ -1778,6 +1821,8 @@ impl Renderer {
         // Mode 8: cells near the camera as tessellated patches; 9: the rest of such a tile.
         let p_terrain_tess = [geom2("terrain tess", Some(&l_tile), &m_terrain, &[], 8), geom2k("terrain tess solid", Some(&l_tile), &m_terrain, &[], 8, &no_photo)];
         let p_terrain_cells = [geom2("terrain cells", Some(&l_tile), &m_terrain, &[], 9), geom2k("terrain cells solid", Some(&l_tile), &m_terrain, &[], 9, &no_photo)];
+        // Mode 14: a tile's water as its own fine grid (Water High, terrain.wgsl vs_water).
+        let p_water = geom2("water grid", Some(&l_tile), &m_terrain, &[], 14);
         let p_build = geom2("build", Some(&l_build), &m_build, &[vb(40, false, &A_BUILD)], 0);
         let p_build_solid = geom2k("build solid", Some(&l_build), &m_build, &[vb(40, false, &A_BUILD)], 0, &[("DISSOLVE", 0.0)]);
         const A_PHOTO: [wgpu::VertexAttribute; 3] = [
@@ -1952,6 +1997,10 @@ impl Renderer {
         let (tix, cix) = (patch(TESS_N), patch(1));
         let tess_ibuf = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("tess idx"), contents: bytemuck::cast_slice(&tix), usage: wgpu::BufferUsages::INDEX });
         let cell_ibuf = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("cell idx"), contents: bytemuck::cast_slice(&cix), usage: wgpu::BufferUsages::INDEX });
+        let water_ibuf = WATER_GRIDS.map(|n| {
+            let ix = water_indices(n);
+            (d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("water grid idx"), contents: bytemuck::cast_slice(&ix), usage: wgpu::BufferUsages::INDEX }), ix.len() as u32)
+        });
 
         // ---- particles
         let psim_ub = d.create_buffer(&wgpu::BufferDescriptor { label: Some("psim"), size: psim_size, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
@@ -1988,7 +2037,7 @@ impl Renderer {
             casc_ub, bg_casc, bg_tileu, l_dres, l_ao, p_gtao, p_ao_blur, p_dres, p_road, p_field, p_lights, dyn_lights, p_tree, p_tree_near, imp, p_tree_shadow, p_tree_shadow_fixed, p_card, near_buf, p_inst, p_inst_shadow, inst_buf, fall_buf, tree_lib: None, inst_lib: None,
             globals_ub, bg0, bg0_pre, bg0_shadow, bg0_with, lut_sky, shadow, shadow_res: SHADOW_RES, clouds: 2, ao: true, bloom: true, shadow_fast: false, msaa: true, l_tile, l_build, l_composite, l_composite1, l_cloud, l_cloud_apply, l_cloud_temporal, l_post, l_pdraw, l_glass,
             tile_ub, l_photo, photo_ub, p_photo, p_photo_mask, p_photo_shadow, p_photo_shadow_fast, l_skin, p_skin, skin_slots, p_water_top, p_lamp_top, photo_mask, photo_mask_dirty: true, build_ub, obj_ub, bg_obj, tile_ibuf, tile_nidx: ix.len() as u32,
-            p_sky, p_terrain, p_terrain_tess, p_terrain_cells, tess_ibuf, tess_nidx: tix.len() as u32, cell_ibuf, p_build, p_build_solid, p_build_shadow, p_obj, p_obj_shadow, p_obj_solid, p_obj_shadow_solid, p_glass, p_composite, p_comp_land, p_comp_water, p_comp_edge, p_cloud, p_cloud_apply, p_cloud_temporal, p_particles, p_taa, p_taa_up, p_final_taau, p_motion, p_reactive, p_psim, p_down, p_up, p_final, p_final_taa, p_final_taa_up, p_blit, p_logo,
+            p_sky, p_terrain, p_terrain_tess, p_terrain_cells, p_water, water_ibuf, tess_ibuf, tess_nidx: tix.len() as u32, cell_ibuf, p_build, p_build_solid, p_build_shadow, p_obj, p_obj_shadow, p_obj_solid, p_obj_shadow_solid, p_glass, p_composite, p_comp_land, p_comp_water, p_comp_edge, p_cloud, p_cloud_apply, p_cloud_temporal, p_particles, p_taa, p_taa_up, p_final_taau, p_motion, p_reactive, p_psim, p_down, p_up, p_final, p_final_taa, p_final_taa_up, p_blit, p_logo,
             psim_ub, pbuf, bg_psim, phead: 0, p_vol, bg_vol_a, bg_vol_b, vol_acc, fluid, fluid_t, ocean, shore, p_shore_cover, smoke_until: 0.0, parts_until: 0.0, now: 0.0, black, targets, cloud_flip: 0, cloud_hist_ok: false, cshadow, lut_bake, lut_haze: 1.0, taa_flip: 0, taa_hist_ok: false, meshes: Vec::new(), egui, logo_font: crate::logo::find_font(), logo_key: None, surface, config, queue, device, stats: [0.0; 4], headless: false, scale: 1.0, integrated, prof, fsr_on: false, fsr_ok, fsr: None,
         })
     }
@@ -3126,6 +3175,21 @@ impl Renderer {
                 rp.set_pipeline(&self.p_terrain_tess[ti][mi]);
                 rp.set_index_buffer(self.tess_ibuf.slice(..), wgpu::IndexFormat::Uint16);
                 rp.draw_indexed(0..self.tess_nidx, 0, 0..(u[10] * u[11]) as u32);
+            }
+            // Water High: the water of the tiles near the camera as fine grids
+            // the waves stand up on (terrain.wgsl vs_water).
+            if !sk("water_grid") {
+                let mut set = false;
+                for (i, (tile, u)) in f.tiles.iter().take(n_tiles).enumerate() {
+                    let Some(g) = WATER_GRIDS.iter().position(|&n| n as f32 == u[5]) else { continue };
+                    if !set {
+                        rp.set_pipeline(&self.p_water[mi]);
+                        set = true;
+                    }
+                    rp.set_bind_group(1, &tile.bind, &[i as u32 * 256]);
+                    rp.set_index_buffer(self.water_ibuf[g].0.slice(..), wgpu::IndexFormat::Uint32);
+                    rp.draw_indexed(0..self.water_ibuf[g].1, 0, 0..1);
+                }
             }
             // Airfield pavement, then roads, straight onto the terrain.
             rp.set_pipeline(&self.p_field[mi]);

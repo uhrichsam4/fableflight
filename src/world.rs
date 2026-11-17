@@ -16,8 +16,10 @@ struct Tile {
     gpu: TileGpu,
     heights: Vec<f32>,
     water: Vec<bool>,
-    /// how much of the ocean's long waves the water shows (sources.rs TileData::sea)
-    sea: Vec<f32>,
+    /// any of it
+    has_water: bool,
+    /// how much of the ocean's two longer wave cascades the water shows (sources.rs TileData::sea)
+    sea: Vec<[f32; 2]>,
     last_used: u64,
     /// imagery source it was made with; a different one gets it made again
     generation: u32,
@@ -155,6 +157,20 @@ fn tess_block(id: TileId, lat: f64, lon: f64, agl: f64, cell: f64) -> [f32; 4] {
     [x0 as f32, y0 as f32, (x1 - x0) as f32, (y1 - y0) as f32]
 }
 
+/// The fine water grid for a tile of width `w` (m) whose nearest point is
+/// `near` metres off (render.rs `WATER_GRIDS`), 0 for none: every tile with
+/// water nearer than the waves reach (terrain.wgsl `DENSE_FAR`), with
+/// vertices a fraction of their distance apart.
+fn water_grid(w: f64, near: f64, agl: f64) -> f32 {
+    let near = near.max(agl).max(0.0);
+    if near > 8200.0 || agl > 3000.0 || !crate::gpuprof::opt_on("water_grid") {
+        return 0.0;
+    }
+    let want = w / (near * 0.004).max(0.5);
+    let g = crate::render::WATER_GRIDS;
+    (if want > g[0] as f64 * 1.4 { g[1] } else { g[0] }) as f32
+}
+
 pub fn crater_profile(d: f64) -> f64 {
     let k = (d - 1.1) / 0.24;
     let rim = 0.22 * (-k * k).exp();
@@ -204,6 +220,9 @@ pub struct World {
     photo: Option<Box<crate::tiles3d::Photo>>,
     /// the waves (their CPU copy, so what floats rides what is drawn)
     pub ocean: crate::ocean::Ocean,
+    /// Water High: the water near the camera drawn as fine grids the waves
+    /// stand up on (terrain.wgsl `vs_water`)
+    pub dense_water: bool,
 }
 
 #[derive(Clone)]
@@ -223,7 +242,7 @@ impl Frustum {
 impl World {
     pub fn new(loader: Loader, max_zoom: u8) -> Self {
         let photo = Some(Box::new(crate::tiles3d::Photo::new(loader.src.google.clone(), Some(loader.src.clone()))));
-        Self { photo, flat: None, loader, tiles: HashMap::new(), builds: HashMap::new(), frame: 0, in_flight: 0, max_zoom, lod_k: 0.62, buildings_on: true, draw: Vec::new(), draw_shore: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), last_update: None, uploads: VecDeque::new(), fields: HashMap::new(), ocean: crate::ocean::Ocean::new() }
+        Self { photo, flat: None, loader, tiles: HashMap::new(), builds: HashMap::new(), frame: 0, in_flight: 0, max_zoom, lod_k: 0.62, buildings_on: true, draw: Vec::new(), draw_shore: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), last_update: None, uploads: VecDeque::new(), fields: HashMap::new(), ocean: crate::ocean::Ocean::new(), dense_water: false }
     }
 
     /// Height of the ground (or water surface) at a lat/lon: the top of the
@@ -426,10 +445,11 @@ impl World {
                 let w = t.water[(y + 0.5) as usize * GV + (x + 0.5) as usize];
                 let mut h = h as f64;
                 // Water rides the ocean's long waves, as much as it shows them.
-                let s = |i: usize, j: usize| t.sea[j * GV + i];
-                let sea = (s(x0, y0) * (1.0 - fx) + s(x0 + 1, y0) * fx) * (1.0 - fy) + (s(x0, y0 + 1) * (1.0 - fx) + s(x0 + 1, y0 + 1) * fx) * fy;
-                if w && sea > 0.0 {
-                    h += sea as f64 * self.ocean.height(geo::lla_to_pos(lat, lon, h));
+                let s = |i: usize, j: usize, c: usize| t.sea[j * GV + i][c];
+                let sea = |c: usize| ((s(x0, y0, c) * (1.0 - fx) + s(x0 + 1, y0, c) * fx) * (1.0 - fy) + (s(x0, y0 + 1, c) * (1.0 - fx) + s(x0 + 1, y0 + 1, c) * fx) * fy) as f64;
+                let sea = [sea(0), sea(1)];
+                if w && sea[0] + sea[1] > 0.0 {
+                    h += self.ocean.height_w(geo::lla_to_pos(lat, lon, h), sea);
                 }
                 if !self.craters.is_empty() {
                     let p = geo::lla_to_pos(lat, lon, h);
@@ -831,7 +851,7 @@ impl World {
                     let slot = match res {
                         Ok(td) => {
                             bytes += crate::render::tile_bytes(&td);
-                            Slot::Ready(Box::new(Tile { center: td.center, radius: td.radius, gpu: r.upload_tile(&td), heights: td.heights, water: td.water, sea: td.sea, last_used: self.frame, generation: td.imagery_gen, refreshing: false }))
+                            Slot::Ready(Box::new(Tile { center: td.center, radius: td.radius, gpu: r.upload_tile(&td), heights: td.heights, has_water: td.water.iter().any(|w| *w), water: td.water, sea: td.sea, last_used: self.frame, generation: td.imagery_gen, refreshing: false }))
                         }
                         Err(e) => {
                             log::debug!("tile {id:?} failed: {e}");
@@ -1239,7 +1259,8 @@ impl World {
                 let o = (t.center - cam).as_vec3();
                 let cell = id.width_m() / GRID as f64;
                 let tess = tess_block(*id, clat, clon, agl, cell);
-                tiles.push((&t.gpu, [o.x, o.y, o.z, cell as f32, id.z as f32, 0.0, 0.0, 0.0, tess[0], tess[1], tess[2], tess[3]]));
+                let grid = if self.dense_water && t.has_water { water_grid(id.width_m(), (t.center - cam).length() - t.radius, agl) } else { 0.0 };
+                tiles.push((&t.gpu, [o.x, o.y, o.z, cell as f32, id.z as f32, grid, 0.0, 0.0, tess[0], tess[1], tess[2], tess[3]]));
             }
         }
         let mut details = Vec::with_capacity(self.draw_b.len());

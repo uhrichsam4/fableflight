@@ -16,6 +16,9 @@ running
 cargo run --release
 ```
 
+# Speedboat and waves
+Besides the aircraft, the start screen's carousel (or `--aircraft boat`) has a speedboat to drive: W/S throttle and reverse, A/D steer, Shift (or Space) for full power. It goes in at the nearest open water to the chosen spot and rides the same waves that are drawn; it planes, banks into turns, jumps off crests and leaves a wake. At Water High the sea near the camera is a fine displaced mesh, so swell and chop stand up as real 3D waves; Water Low keeps the lighter surface.
+
 # Language
 The interface is in English or French. It follows the system language, can be changed in Settings (start screen or pause menu), and is remembered. For one run: `cargo run --release -- --lang fr`.
 

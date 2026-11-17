@@ -3,6 +3,7 @@ mod airfield;
 mod airmodels;
 mod airports;
 mod audio;
+mod boat;
 mod buildings;
 mod aircraft;
 mod cockpit;
@@ -281,6 +282,10 @@ struct Args {
     approach: bool,
     /// which aircraft to fly (`aircraft::by_key`)
     aircraft: Option<String>,
+    /// drive the speedboat instead (`--aircraft boat`)
+    boat: bool,
+    /// --boat-steer SEC,STEER: hold the boat's wheel there from then on (scripted screenshots)
+    boat_steer: Option<(f64, f64)>,
     /// start with the HUD hidden (H), for screenshots
     no_hud: bool,
     /// open the large map (M) after this many seconds, for scripted screenshots
@@ -347,6 +352,8 @@ fn parse_args() -> Args {
         runway: None,
         approach: false,
         aircraft: None,
+        boat: false,
+        boat_steer: None,
         no_hud: false,
     };
     let v: Vec<String> = std::env::args().skip(1).collect();
@@ -398,12 +405,22 @@ fn parse_args() -> Args {
                 a.menu.get_or_insert(false);
                 used = 2;
             }
-            "--aircraft" => {
+            "--aircraft" | "--vehicle" => {
                 a.aircraft = v.get(i + 1).cloned();
+                a.boat = a.aircraft.as_deref().is_some_and(boat::is_key);
+                if a.boat {
+                    a.aircraft = None;
+                }
                 if let Some(k) = &a.aircraft {
                     if aircraft::by_key(k).is_none() {
-                        eprintln!("unknown aircraft {k} (try {})", aircraft::ALL.iter().map(|s| s.keys[0]).collect::<Vec<_>>().join(", "));
+                        eprintln!("unknown aircraft {k} (try {}, boat)", aircraft::ALL.iter().map(|s| s.keys[0]).collect::<Vec<_>>().join(", "));
                     }
+                }
+            }
+            "--boat-steer" => {
+                let p: Vec<f64> = v.get(i + 1).map(|s| s.split(',').filter_map(|x| x.parse().ok()).collect()).unwrap_or_default();
+                if p.len() == 2 {
+                    a.boat_steer = Some((p[0], p[1]));
                 }
             }
             "--approach" => {
@@ -617,6 +634,14 @@ struct Game {
     /// aircraft models being built on a background thread (menu selection)
     building: Vec<(&'static aircraft::Spec, std::sync::mpsc::Receiver<airframe::Model>)>,
     plane: Plane,
+    /// driving the speedboat (the aircraft then stays out of sight, and
+    /// `plane` only follows the boat for the camera, sound and effects)
+    boat_mode: bool,
+    boat: Option<boat::Boat>,
+    /// where it is to be put in the water once the ground there has loaded:
+    /// lat, lon (rad), heading, since (real seconds)
+    boat_seek: Option<(f64, f64, f64, f64)>,
+    boat_steer: Option<(f64, f64)>,
     crashed: bool,
     crash: Option<Crash>,
     crash_real: f64,
@@ -901,6 +926,8 @@ impl Game {
         solids.extend(destruct::rebar_meshes());
         debug_assert_eq!(solids.len() as u32, airmodels::BASE);
         solids.extend(airmodels::build());
+        debug_assert_eq!(solids.len() as u32, boat::MESH);
+        solids.extend(boat::meshes());
         r.set_inst_meshes(&solids);
         let mut menu = menu::Menu::new(lat, lon, args.hour);
         menu.aircraft = aircraft::ALL.iter().position(|s| std::ptr::eq(*s, spec)).unwrap_or(0);
@@ -952,7 +979,7 @@ impl Game {
         // for the gear, flaps and control surfaces as they move.
         let (cy, cp, cd) = args.cam.unwrap_or((0.0, 0.2, spec.cam_dist));
         let mut g = Self {
-            gkey: src.google.key(), gkey_show: false, gm_logo: None, stills: vec![None; aircraft::ALL.len()], map: minimap::Map::new(src.clone(), prefs.minimap), window, r, world, src, spec, model, piece_mesh, group_mesh, piece_cut, group_pivots, hangar: Vec::new(), building: Vec::new(), crashed: false, crash: None, crash_real: 0.0, egui_ctx, egui_state, keys: HashSet::new(), drag: false, last_cursor: None,
+            gkey: src.google.key(), gkey_show: false, gm_logo: None, stills: vec![None; aircraft::ALL.len() + 1], map: minimap::Map::new(src.clone(), prefs.minimap), window, r, world, src, spec, model, piece_mesh, group_mesh, piece_cut, group_pivots, hangar: Vec::new(), building: Vec::new(), crashed: false, crash: None, crash_real: 0.0, egui_ctx, egui_state, keys: HashSet::new(), drag: false, last_cursor: None,
             cam_yaw: cy.to_radians(), cam_pitch: cp, cam_dist: cd, cam_mode: if args.cockpit { 1 } else { prefs.cam_mode }, cam_pos, cam_dir: -plane.forward(), cam_look: plane.pos, orbit: 0.0, cam_rise: 0.0, cam_clear_t: 0.0, cam_ang: None, cam_hold: 0.0,
             utc: (args.hour - lon / 15.0).rem_euclid(24.0), doy: args.day.unwrap_or(doy), wx, time: 0.0, real: 0.0, last: Instant::now(), acc: 0.0, wave_off: DVec2::ZERO, shore: shore::Shore::default(), ocean_off: DVec2::ZERO, prev_cam: cam_pos, snow_s: 0.0, snow_axis: DVec3::Z, prev_vp: [[0.0; 4]; 4], taa: args.taa && prefs.taa, prev_plane: Mat4::IDENTITY, plane_box,
             frame: 0, fps: 60.0, fps_log: (args.fps_log, Instant::now(), 0, 0.0), paused: false, show_help: false, show_hud: !args.no_hud && prefs.show_hud, goto_open: false, goto_text: String::new(), goto_rx: None, route: args.route.as_deref().map(route::Route::from_list).unwrap_or_else(route::Route::empty), route_rx: Vec::new(), sim_speed: args.sim_speed,
@@ -962,6 +989,7 @@ impl Game {
             g_slow: 1.0, last_bump: 0.0, was_ground: false, prev_vs: 0.0, prev_gear: plane.gear, prev_flaps: plane.flaps, quit: false,
             mode: if args.menu.unwrap_or(true) { Mode::Menu } else { Mode::Fly }, menu, menu_go: args.menu_go, heading: args.heading.to_radians(), destr: destruct::Destruction::new(secs.to_bits()),
             sheds: damage::Sheds::default(), fx_anchor: plane.pos, fx_shift: DVec3::ZERO, smoke_acc: 0.0, flash: Vec::new(), damage_spec: args.damage.clone(), wreck_dirty: false, wreck_t: 0.0, wreck_seen: 0.0,
+            boat_mode: args.boat, boat: None, boat_seek: None, boat_steer: args.boat_steer,
             start_rx: None, name_rx: None, last_click: -10.0, n_cars: 0, city_glow: 0.0, gauges: gauges::Gauges::new(&plane, secs.to_bits()), plane,
             airport_rx: None, hold_spot: None,
             gfx, gfx0: gfx, gfx_base, prefs_load: prefs.clone(), prefs_start: None, gfx_applied: None, gfx_keep: prefs.graphics, dyn_ms: 0.0, dyn_t: Instant::now(), dyn_up: false, dyn_ban: (0.0, Instant::now()), frame_t0: Instant::now(), frame_ms: 16.0, casc_keep: [([[0.0; 4]; 4], DVec3::ZERO); 3], casc_ok: false,
@@ -980,6 +1008,11 @@ impl Game {
                 i.map(|i| (i, args.runway.clone(), args.approach))
             }),
         };
+        if g.boat_mode {
+            g.menu.aircraft = aircraft::ALL.len();
+            g.boat_seek = Some((lat.to_radians(), lon.to_radians(), args.heading.to_radians(), 0.0));
+            g.cam_dist = boat::CAM_DIST;
+        }
         // With --menu, an --airport is chosen on the globe rather than flown from.
         if args.menu == Some(true) {
             if let Some((i, rw, appr)) = g.pending_airport.take() {
@@ -1026,6 +1059,149 @@ impl Game {
         self.spec = spec;
         self.cam_dist = spec.cam_dist;
         self.menu.aircraft = aircraft::ALL.iter().position(|s| std::ptr::eq(*s, spec)).unwrap_or(0);
+    }
+
+    /// The vehicle chosen in the start screen: one of the aircraft
+    /// (`aircraft::ALL`), or past them the speedboat.
+    fn set_vehicle(&mut self, k: usize) {
+        let n = aircraft::ALL.len();
+        if k >= n {
+            // (the aircraft behind it stays the light single: the camera and
+            // the sound are set for its size)
+            self.set_aircraft(aircraft::ALL[0]);
+            self.boat_mode = true;
+            self.menu.aircraft = n;
+            self.cam_dist = boat::CAM_DIST;
+        } else {
+            self.boat_mode = false;
+            self.boat = None;
+            self.boat_seek = None;
+            self.set_aircraft(aircraft::ALL[k]);
+        }
+    }
+
+    /// The boat waits where it is to go until the ground there has loaded,
+    /// then goes in at the nearest open water (some 25 m of it each way),
+    /// searched in rings out to a few kilometres.
+    fn boat_seek_water(&mut self) {
+        let Some((lat, lon, hdg, since)) = self.boat_seek else { return };
+        let waited = self.real - since;
+        if self.world.ground_zoom(lat, lon).is_none_or(|z| z < 13) && waited < 25.0 {
+            return;
+        }
+        let w = &self.world;
+        let at = |de: f64, dn: f64| (lat + dn / geo::R, lon + de / (geo::R * lat.cos().max(0.05)));
+        let wet = |la: f64, lo: f64| w.ground(la, lo).is_some_and(|g| g.water);
+        let open = |de: f64, dn: f64| {
+            let (la, lo) = at(de, dn);
+            wet(la, lo) && (0..8).all(|k| {
+                let a = k as f64 * std::f64::consts::FRAC_PI_4;
+                let (la, lo) = at(de + 25.0 * a.cos(), dn + 25.0 * a.sin());
+                wet(la, lo)
+            })
+        };
+        let mut found = None;
+        'rings: for ring in 0..=60 {
+            let r = ring as f64 * 50.0;
+            let n = ((std::f64::consts::TAU * r / 50.0).ceil() as usize).max(1);
+            for k in 0..n {
+                let a = k as f64 / n as f64 * std::f64::consts::TAU;
+                if open(r * a.cos(), r * a.sin()) {
+                    found = Some(at(r * a.cos(), r * a.sin()));
+                    break 'rings;
+                }
+            }
+        }
+        let (la, lo) = match found {
+            Some(p) => p,
+            // Tiles still streaming in: look again in a moment.
+            None if waited < 25.0 => return,
+            None => {
+                self.status = t!("No open water near here", "Pas d'eau libre par ici").into();
+                self.status_until = self.real + 6.0;
+                (lat, lon)
+            }
+        };
+        let h = self.world.ground(la, lo).map(|g| g.h).unwrap_or(0.0);
+        let b = boat::Boat::new(geo::lla_to_pos(la, lo, h + 0.1), hdg);
+        self.plane.pos = b.pos;
+        self.plane.rot = b.rot;
+        self.plane.vel = DVec3::ZERO;
+        self.cam_pos = b.pos - b.forward() * boat::CAM_DIST;
+        self.cam_dir = -b.forward();
+        self.prev_cam = self.cam_pos;
+        self.boat = Some(b);
+        self.boat_seek = None;
+    }
+
+    /// After the boat's steps: the aircraft model behind the camera, sound
+    /// and effects follows it, and the spray and splashes it threw go up.
+    fn boat_effects(&mut self, dt: f64, femit: &mut Vec<(DVec3, render::Particle)>) {
+        let Some(b) = self.boat.as_mut() else { return };
+        if self.frame % 240 == 0 {
+            let up = b.pos.normalize();
+            log::debug!("boat: {:.1} kt, trim {:.1}°, roll {:.1}°, wet {:.2}, prop {:.2}, wake {}", b.speed() * 1.94384, b.forward().dot(up).asin().to_degrees(), (b.rot * DVec3::X).dot(up).asin().to_degrees(), b.wet, b.prop_wet, b.wake.len());
+        }
+        let spray: Vec<_> = b.spray.drain(..).collect();
+        let splashes: Vec<_> = b.splashes.drain(..).collect();
+        let (pos, rot, vel, up) = (b.pos, b.rot, b.vel, b.pos.normalize());
+        let p = &mut self.plane;
+        p.pos = pos;
+        p.rot = rot;
+        p.vel = vel;
+        p.omega = DVec3::ZERO;
+        p.on_ground = false;
+        p.gear = 1.0;
+        p.throttle = b.throttle.abs().min(1.0);
+        // (the light single's engine sound, run at an outboard's revs)
+        p.prop_rate = (450.0 + b.rpm * 0.42) * std::f64::consts::TAU / 60.0;
+        p.power = p.throttle;
+        p.g_load = 1.0;
+        let stern_spray = b.prop_wet > 0.3 && b.speed() > 6.0;
+        let stern = pos + rot * DVec3::new(0.0, -0.2, boat::STERN + 0.5);
+        let spd = b.speed() as f32;
+        if spray.is_empty() && splashes.is_empty() && !stern_spray {
+            return;
+        }
+        self.anchor_fx(pos);
+        let upf = up.as_vec3();
+        for (at, v, k) in spray {
+            let r = &mut self.rng;
+            femit.push((at, render::Particle { vel: (v.as_vec3() + r.dir() * 0.8).into(), life: r.range(0.5, 1.3), size0: r.range(0.08, 0.2) * (0.6 + k), size1: r.range(0.5, 1.3) * (0.6 + k), kind: crash::DROPS, drag: r.range(0.25, 0.6), seed: r.f(), alpha: r.range(0.35, 0.6), ..Default::default() }));
+            if r.f() < 0.6 * k {
+                femit.push((at, render::Particle { vel: (v.as_vec3() * 0.6 + r.dir() * 0.5).into(), life: r.range(0.8, 1.8), size0: r.range(0.4, 0.8), size1: r.range(1.6, 3.2), kind: crash::MIST, drag: 1.6, buoy: 0.0, seed: r.f(), alpha: r.range(0.08, 0.16), ..Default::default() }));
+            }
+        }
+        // The rooster tail off the propeller.
+        if stern_spray {
+            let r = &mut self.rng;
+            let n = ((spd - 6.0) / 6.0).clamp(0.0, 3.0) * 30.0 * dt as f32;
+            let mut k = n;
+            while k > 0.0 && r.f() < k {
+                k -= 1.0;
+                let back = (rot * DVec3::Z).as_vec3();
+                let v = vel.as_vec3() * 0.35 + back * r.range(2.0, 5.0) + upf * r.range(1.5, 3.5) + r.dir() * 0.7;
+                femit.push((stern, render::Particle { vel: v.into(), life: r.range(0.6, 1.4), size0: r.range(0.08, 0.18), size1: r.range(0.5, 1.2), kind: crash::DROPS, drag: 0.5, seed: r.f(), alpha: r.range(0.3, 0.5), ..Default::default() }));
+            }
+        }
+        for (at, vs) in splashes {
+            let n = (12.0 + 14.0 * vs).min(90.0) as usize;
+            let s = (vs / 4.0).clamp(0.3, 2.0) as f32;
+            for _ in 0..n {
+                let r = &mut self.rng;
+                let d = r.dir();
+                let out = (d - upf * d.dot(upf)).normalize_or_zero();
+                let v = vel.as_vec3() * 0.4 + out * r.range(2.0, 6.0) * s + upf * r.range(1.5, 5.0) * s;
+                let p0 = at + (out * r.range(0.5, 2.5)).as_dvec3();
+                femit.push((p0, render::Particle { vel: v.into(), life: r.range(0.7, 1.8), size0: r.range(0.1, 0.25), size1: r.range(0.6, 1.6) * s, kind: crash::DROPS, drag: r.range(0.2, 0.5), seed: r.f(), alpha: r.range(0.35, 0.6), ..Default::default() }));
+                if r.f() < 0.3 {
+                    femit.push((p0, render::Particle { vel: (v * 0.4).into(), life: r.range(1.2, 2.5), size0: r.range(0.6, 1.2), size1: r.range(2.5, 5.0) * s, kind: crash::MIST, drag: 1.4, seed: r.f(), alpha: r.range(0.08, 0.16), ..Default::default() }));
+                }
+            }
+            if let Some(a) = &self.audio {
+                a.event(audio::Event::Splash((vs as f32 / 5.0).clamp(0.2, 1.5)));
+            }
+        }
     }
 
     /// Menu selection: swap to `spec` without stalling the frame. A model not
@@ -1133,6 +1309,12 @@ impl Game {
     }
 
     fn respawn_at(&mut self, lat: f64, lon: f64, alt: f64, heading: f64, speed: f64) {
+        if self.boat_mode {
+            // The boat goes in the water nearest the spot, once its ground is known.
+            self.boat = None;
+            self.boat_seek = Some((lat, lon, heading, self.real));
+            self.cam_dist = boat::CAM_DIST;
+        }
         self.hold_spot = None;
         self.parking_brake = false;
         self.plane = Plane::spawn(self.spec, lat, lon, alt, heading, speed);
@@ -1758,8 +1940,8 @@ impl Game {
         if self.menu.starting {
             return;
         }
-        self.set_aircraft(aircraft::ALL[self.menu.aircraft.min(aircraft::ALL.len() - 1)]);
-        if let Some(i) = self.menu.airport.filter(|_| self.menu.start != menu::Start::Overhead) {
+        self.set_vehicle(self.menu.aircraft);
+        if let Some(i) = self.menu.airport.filter(|_| self.menu.start != menu::Start::Overhead && !self.boat_mode) {
             self.start_airport(i, self.menu.runway.clone(), self.menu.start == menu::Start::Approach, false);
             return;
         }
@@ -1934,7 +2116,7 @@ impl Game {
 
     /// Tell the sound what the aircraft and the camera are doing.
     fn update_audio(&mut self, cam: DVec3, fire: f32, in_menu: bool, c: &Controls, dt: f64, scrape: f32) {
-        self.warn = if dt > 0.0 { self.warnings() } else { audio::Warn::default() };
+        self.warn = if dt > 0.0 && !self.boat_mode { self.warnings() } else { audio::Warn::default() };
         let live = !self.crashed && !in_menu && dt > 0.0;
         let p = &self.plane;
         let up = p.pos.normalize();
@@ -2199,6 +2381,7 @@ impl Game {
         self.r.set_msaa(g.msaa);
         self.r.set_water(g.water);
         self.world.ocean.set_quality(g.water);
+        self.world.dense_water = g.water > 0;
         self.r.set_upscaler(g.upscaler == settings::Upscaler::Fsr);
         self.r.set_vsync(g.vsync);
         // (the window's resize event then resizes the surface and the targets)
@@ -2486,11 +2669,31 @@ impl Game {
         let mut emit = Vec::new();
         let mut femit: Vec<(DVec3, render::Particle)> = Vec::new();
         let (mut scrape_n, mut steps) = (0usize, 0usize);
+        if self.boat_mode && !in_menu {
+            self.boat_seek_water();
+        }
         if !self.crashed && !in_menu {
             self.acc += dt;
             let h = 1.0 / 180.0;
             while self.acc >= h {
                 self.acc -= h;
+                if self.boat_mode {
+                    // The speedboat instead of the aircraft (boat.rs).
+                    if let Some(b) = self.boat.as_mut() {
+                        let world = &self.world;
+                        let mut sea = |p: DVec3| {
+                            let (la, lo, _) = geo::pos_to_lla(p);
+                            world.ground(la, lo).map(|g| boat::Surface { h: g.h, water: g.water }).unwrap_or(boat::Surface { h: 0.0, water: true })
+                        };
+                        let mut bi = boat::Input { throttle: (-c.pitch).max(if c.boost { 1.0 } else { -1.0 }), steer: (c.roll + 0.5 * c.yaw).clamp(-1.0, 1.0), boost: c.boost || c.throttle > 0.5 };
+                        if let Some((_, st)) = self.boat_steer.filter(|(t, _)| self.real > *t) {
+                            bi.steer = st;
+                        }
+                        b.step(h, &bi, &mut sea);
+                    }
+                    steps += 1;
+                    continue;
+                }
                 let imp = self.plane.step(h, &c, &self.world);
                 self.gauges.update(h, &self.plane, self.time);
                 steps += 1;
@@ -2629,6 +2832,9 @@ impl Game {
                     break;
                 }
             }
+        }
+        if self.boat_mode && !in_menu {
+            self.boat_effects(dt, &mut femit);
         }
         if dt > 0.0 {
             self.destr.update(dt as f32, &self.world, &mut femit);
@@ -2854,7 +3060,7 @@ impl Game {
             cam = self.cam_pos;
             dir = (self.cam_look - cam).normalize();
             upv = u;
-        } else if self.cam_mode == 1 {
+        } else if self.cam_mode == 1 && !self.boat_mode {
             if !self.head_live {
                 self.head.reset(self.cam_yaw, self.cam_pitch);
                 self.head_live = true;
@@ -3066,7 +3272,7 @@ impl Game {
             taa: [jitter.x * 0.5, -jitter.y * 0.5, if self.taa { 1.0 } else { 0.0 }, 0.0],
             plane_inv: [[0.0; 4]; 4],
             plane_prev: [[0.0; 4]; 4],
-            plane_box: self.plane_box,
+            plane_box: if self.boat_mode { boat::TAA_BOX } else { self.plane_box },
             weather: { let o = self.wx.cloud_off; [o.x as f32, o.y as f32, o.z as f32, if in_menu { 1.0 } else { self.wx.haze }] },
             storm: { let w = self.wx.steady(cam, 2000.0); let d = if w.length() > 0.1 { w.normalize() } else { east }; v4(d, 0.0) },
             storm_cells: [[0.0; 4]; 2 * weather::MAX_STORMS],
@@ -3085,7 +3291,11 @@ impl Game {
             foam: [[0.0; 4]; 16],
             start: [if in_menu { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
             snow: v4(self.snow_axis, self.snow_s),
+            wake: [[0.0; 4]; render::WAKE_ROWS],
         };
+        if let Some(b) = self.boat.as_ref().filter(|_| self.boat_mode && !in_menu) {
+            b.wake_rows(cam, &mut g.wake);
+        }
         if !in_menu {
             let cells = self.wx.storm_cells(cam);
             g.storm[3] = cells.len() as f32;
@@ -3161,7 +3371,7 @@ impl Game {
             }
         }
         let params = self.instruments(agl);
-        if !self.crashed && !in_menu {
+        if !self.crashed && !in_menu && !self.boat_mode {
             let base = Mat4::from_rotation_translation(self.plane.rot.as_quat(), (self.plane.pos - cam).as_vec3());
             let pose = self.plane.pose(&self.model.pieces);
             // Blades while they can be followed by eye, a blur once they cannot.
@@ -3262,6 +3472,9 @@ impl Game {
         self.livewx.step(&self.src, &mut self.wx, wx_at, if in_menu { 0.0 } else { dt_real });
         if !in_menu {
             self.live.instances(cam, &mut insts, &mut air_lights);
+            if let Some(b) = self.boat.as_ref().filter(|_| self.boat_mode) {
+                b.instances(cam, &mut insts);
+            }
         }
         self.live_view = Some((vp, cam));
 
@@ -3443,7 +3656,9 @@ impl Game {
             let air_room = screen.height() - TOP - (14.0 + 290.0 + M);
             let show_blurb = air_room >= 58.0 + 196.0 + 52.0;
             let pic_h = (air_room - 58.0 - if show_blurb { 52.0 } else { 0.0 }).clamp(100.0, 196.0);
-            let n_air = aircraft::ALL.len();
+            // (the aircraft, then the speedboat)
+            let n_air = aircraft::ALL.len() + 1;
+            let is_boat = self.menu.aircraft >= aircraft::ALL.len();
             let mut choose_air: Option<usize> = None;
 
             // Top left: the aircraft window. Its name in the title bar with
@@ -3451,7 +3666,8 @@ impl Game {
             let air = egui::Area::new(egui::Id::unique("menu_air")).anchor(Align2::LEFT_TOP, [M, TOP]).show(ctx, |ui| {
                 ui.set_width(W);
                 ui.spacing_mut().item_spacing.y = 0.0;
-                let spec = aircraft::ALL[self.menu.aircraft.min(n_air - 1)];
+                let spec = aircraft::ALL[self.menu.aircraft.min(aircraft::ALL.len() - 1)];
+                let (veh_name, veh_blurb) = if is_boat { (boat::NAME, boat::BLURB) } else { (spec.name, spec.blurb) };
                 let top = egui::CornerRadius { nw: 12, ne: 12, sw: 0, se: 0 };
                 let bottom = egui::CornerRadius { nw: 0, ne: 0, sw: 12, se: 12 };
                 egui::Frame::new().fill(menu::PANEL).corner_radius(top).inner_margin(egui::Margin { left: 10, right: 10, top: 12, bottom: 10 }).show(ui, |ui| {
@@ -3467,27 +3683,34 @@ impl Game {
                         }
                         let name_w = ui.available_width() - 34.0 - ui.spacing().item_spacing.x;
                         ui.allocate_ui_with_layout(egui::vec2(name_w, 34.0), egui::Layout::top_down(egui::Align::Center), |ui| {
-                            ui.label(RichText::new(t!("AIRCRAFT", "AVION")).size(10.5).strong().color(DIM).extra_letter_spacing(1.5));
-                            ui.label(RichText::new(spec.name).size(18.0).strong().color(Color32::WHITE));
+                            ui.label(RichText::new(if is_boat { t!("VEHICLE", "VÉHICULE") } else { t!("AIRCRAFT", "AVION") }).size(10.5).strong().color(DIM).extra_letter_spacing(1.5));
+                            ui.label(RichText::new(tr(veh_name)).size(18.0).strong().color(Color32::WHITE));
                         });
                         if arrow(ui, 0.0).clicked() {
                             choose_air = Some((self.menu.aircraft + 1) % n_air);
                         }
                     });
                 });
-                let k = self.menu.aircraft.min(n_air - 1);
-                let tex = self.stills[k].get_or_insert_with(|| {
-                    let img = image::load_from_memory(spec.still).expect("aircraft still").to_rgba8();
-                    let size = [img.width() as usize, img.height() as usize];
-                    ctx.load_texture(format!("aircraft {k}"), egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()), egui::TextureOptions::LINEAR)
-                });
+                // (the boat's picture after the aircraft's)
+                let k = self.menu.aircraft.min(aircraft::ALL.len());
+                let still = if is_boat { boat::STILL } else { spec.still };
                 let (pic, _) = ui.allocate_exact_size(egui::vec2(W, pic_h), egui::Sense::hover());
                 ui.painter().rect_filled(pic, 0.0, menu::PANEL);
-                egui::Image::new(&*tex).paint_at(ui, egui::Rect::from_center_size(pic.center(), egui::vec2(W * pic_h / 196.0, pic_h)));
+                let tex = self.stills[k].get_or_insert_with(|| {
+                    let img = image::load_from_memory(still).expect("vehicle still").to_rgba8();
+                    let size = [img.width() as usize, img.height() as usize];
+                    ctx.load_texture(format!("vehicle {k}"), egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()), egui::TextureOptions::LINEAR)
+                });
+                let r = egui::Rect::from_center_size(pic.center(), egui::vec2(W * pic_h / 196.0, pic_h));
+                if is_boat {
+                    egui::Image::new(&*tex).corner_radius(8.0).paint_at(ui, r.shrink(6.0));
+                } else {
+                    egui::Image::new(&*tex).paint_at(ui, r);
+                }
                 egui::Frame::new().fill(menu::PANEL).corner_radius(bottom).inner_margin(egui::Margin { left: 16, right: 16, top: 10, bottom: 12 }).show(ui, |ui| {
                     ui.set_width(W - 32.0);
                     if show_blurb {
-                        ui.label(RichText::new(tr(spec.blurb)).size(12.0).color(DIM));
+                        ui.label(RichText::new(tr(veh_blurb)).size(12.0).color(DIM));
                     }
                 });
             });
@@ -3532,6 +3755,8 @@ impl Game {
                             }
                             ui.add_space(2.0);
                             let tip = if padui::active() { t!("Or turn the globe (left stick, triggers to zoom) and press X at the crosshair.", "Ou tournez le globe (stick gauche, gâchettes pour zoomer) et appuyez sur X au viseur.") } else { t!("Or drag the globe, scroll to zoom, and click where you want to start.", "Ou faites glisser le globe, zoomez à la molette et cliquez là où vous voulez partir.") };
+                            // (a boat goes in at the nearest open water: a place, an airport or a click inland all work)
+                            let tip = if is_boat { t!("Boats start on the nearest water to the place, airport or spot you pick.", "Les bateaux partent de l'eau la plus proche du lieu, de l'aéroport ou du point choisi.") } else { tip };
                             ui.label(RichText::new(tip).size(11.5).color(DIM));
                         });
                         let place = menu::QUICK.iter().find(|q| self.menu.pick == Some((q.1, q.2))).map(|q| tr(q.0)).unwrap_or("");
@@ -3618,7 +3843,7 @@ impl Game {
                         padui::follow_focus(ui);
                     });
                     ui.add_space(10.0);
-                    let text = if self.menu.starting { t!("Preparing…", "Préparation…") } else { t!("TAKE OFF", "DÉCOLLER") };
+                    let text = if self.menu.starting { t!("Preparing…", "Préparation…") } else { if is_boat { t!("CAST OFF", "EN ROUTE") } else { t!("TAKE OFF", "DÉCOLLER") } };
                     let ready = self.menu.pick.is_some() && !self.menu.starting;
                     let take_off = menu::wide_button(ui, text, if ready { Hint::of("Enter", "Menu") } else { Hint::None }, true, ready);
                     if take_off.clicked() {
@@ -3758,7 +3983,7 @@ impl Game {
         if let Some(i) = airport {
             self.choose_airport(i);
         }
-        let want = aircraft::ALL[self.menu.aircraft.min(aircraft::ALL.len() - 1)];
+        let want = aircraft::ALL[if self.menu.aircraft >= aircraft::ALL.len() { 0 } else { self.menu.aircraft }];
         if !std::ptr::eq(want, self.spec) {
             self.want_aircraft(want);
         }
@@ -4353,7 +4578,7 @@ impl Game {
                             ui.add_space(6.0);
                             menu::heading(ui, t!("AIRCRAFT", "AVION"));
                             egui::Grid::new("info_ac").num_columns(2).spacing([14.0, 3.0]).show(ui, |ui| {
-                                row(ui, t!("Aircraft", "Avion"), p.spec.name.into(), TEXT);
+                                row(ui, if self.boat_mode { t!("Vehicle", "Véhicule") } else { t!("Aircraft", "Avion") }, if self.boat_mode { tr(boat::NAME).into() } else { p.spec.name.into() }, TEXT);
                                 if jet {
                                     row(ui, t!("Thrust", "Poussée"), format!("{:.0}%  ·  N1 {:.0}%{}", p.throttle * 100.0, p.n1 * 100.0, if p.reverser > 0.0 { "  · REV" } else { "" }), TEXT);
                                 } else {
@@ -4524,6 +4749,27 @@ impl Game {
             if self.show_hud {
                 let hud_r = egui::Area::new(egui::Id::unique("hud")).anchor(Align2::LEFT_TOP, [14.0, 14.0]).show(ctx, |ui| {
                     panel.show(ui, |ui| {
+                        if self.boat_mode {
+                            // The boat: speed over the water, heading, the motor.
+                            match self.boat.as_ref() {
+                                Some(b) => {
+                                    shadow(ui, format!("SPD {:>4.1} kt", b.speed().max(0.0) * 1.94384), 20.0, white);
+                                    shadow(ui, format!("HDG {:>4.0}°   GS {:>4.1} kt", hdg, gs * 1.94384), 14.0, dim);
+                                    let gear = if b.throttle < -0.02 { t!("ASTERN", "ARRIÈRE") } else if b.throttle > 0.02 { t!("AHEAD", "AVANT") } else { t!("NEUTRAL", "POINT MORT") };
+                                    shadow(ui, format!("THR {:>3.0}%  {gear}   {:>4.0} rpm", b.throttle.abs().min(1.4) * 100.0, b.rpm), 14.0, dim);
+                                    if wind_kt >= 0.5 {
+                                        shadow(ui, t!("WIND {:03.0}°/{:.0} kt   SEA {:.1} m", "VENT {:03.0}°/{:.0} kt   MER {:.1} m", self.wx.wind_from, wind_kt, self.world.ocean.hs), 14.0, dim);
+                                    }
+                                    if b.aground {
+                                        shadow(ui, t!("AGROUND", "ÉCHOUÉ").into(), 20.0, Color32::from_rgb(255, 90, 60));
+                                    } else if b.air_t > 0.3 {
+                                        shadow(ui, t!("AIRBORNE", "EN L'AIR").into(), 16.0, Color32::from_rgb(255, 190, 60));
+                                    }
+                                }
+                                None => shadow(ui, t!("Finding water…", "Recherche d'eau…").into(), 16.0, white),
+                            }
+                            return;
+                        }
                         shadow(ui, format!("IAS {:>4.0} kt", speed * 1.94384), 20.0, white);
                         shadow(ui, format!("ALT {:>5.0} ft", alt * 3.28084), 20.0, white);
                         shadow(ui, format!("AGL {:>5.0} ft", agl.max(0.0) * 3.28084), 14.0, dim);

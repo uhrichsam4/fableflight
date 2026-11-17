@@ -739,8 +739,8 @@ pub struct TileData {
     pub heights: Vec<f32>,
     pub water: Vec<bool>,
     /// on the same grid: how much of the ocean's long waves the water shows
-    /// (ocean.rs `sea_weight`, as the shaders' `sea_state`), 0 on land
-    pub sea: Vec<f32>,
+    /// (ocean.rs `sea_state`, as the shaders'), its two longer cascades; 0 on land
+    pub sea: Vec<[f32; 2]>,
     pub imagery: Vec<Vec<u8>>, // mip chain, rgba
     pub img_size: u32,
     pub mask: Vec<Vec<u8>>, // mip chain, rgba (see ground_mask)
@@ -1028,9 +1028,10 @@ pub fn build_tile(src: &Sources, id: TileId) -> Result<TileData> {
                 let shore = mask_at(3, u, v, 0);
                 let shore = ((shore - 0.5) / 0.5).clamp(0.0, 1.0);
                 let shore = shore * shore * (3.0 - 2.0 * shore);
-                crate::ocean::sea_weight(mask_at(1, u, v, 1) * 255.0 / 80.0, id.lat_lon(u, v).0.sin() as f32, shore)
+                let st = crate::ocean::sea_state(mask_at(1, u, v, 1) * 255.0 / 80.0, id.lat_lon(u, v).0.sin() as f32, shore);
+                [st[0], st[1]]
             } else {
-                0.0
+                [0.0; 2]
             });
             verts.push(TerrainVertex {
                 pos: p.as_vec3().into(),

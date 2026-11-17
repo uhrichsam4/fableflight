@@ -488,7 +488,9 @@ fn pom(l: i32, wc: vec2f, Vt: vec3f, depth: f32, dx: vec2f, dy: vec2f) -> vec2f 
 fn finish(Pin: vec3f, nrm: vec3f, uv: vec2f, depth: f32, skirt: f32, sp: f32) -> VOut {
   var P = Pin;
   let m = textureSampleLevel(t_mask, s_clamp, uv, 1.0);
-  if (m.r > 0.5 && skirt < 0.5) {
+  // (a tile whose water is drawn as its own fine grid, vs_water, keeps its
+  // own vertices still: the land's edge stays where it is)
+  if (m.r > 0.5 && skirt < 0.5 && !dense_water()) {
     let d = length(P);
     let fade = 1.0 - smoothstep(2500.0, 6000.0, d);
     if (fade > 0.0) {
@@ -642,6 +644,110 @@ fn relief(P: vec3f, N: vec3f, uv: vec2f, sp: f32) -> f32 {
   return finish(v.P, v.N, v.uv, v.depth, 0.0, T.offset.w);
 }
 
+// ------------------------------------------------------------ water
+// The water's G-buffer: its photo (unlit tint) and depth, class and openness
+// for the composite (composite.wgsl `water`).
+fn water_out(img: vec3f, m: vec4f, shore: f32, d: f32) -> GOut {
+  let wclass = round(m.g * 255.0 / 80.0);
+  // Bathymetry is coarse (and missing in bays): never shallower than a plausible shore profile.
+  let profile = 0.35 + shore * shore * select(select(9.0, 3.5, wclass > 2.5), 14.0, wclass < 1.5);
+  var depth = max(mix(min(d, 1.2), d, shore), profile);
+  return GOut(vec4f(img, 1.0), vec4f(max(depth, 0.15), wclass, shore, 1.0), 0.0);
+}
+
+// Real waves (Water High): the water of the tiles near the camera is drawn a
+// second time as its own fine grid, S x S over the tile (S = T.info.y,
+// render.rs `water_idx`, picked by distance in world.rs `draw_lists`), and
+// the FFT ocean moves every vertex - the swell and the chop stand up as
+// relief, on the horizon too. The tile's own pass then leaves its water out
+// (fs) and keeps its vertices still. The grid lies on the tile's own
+// triangles (the same diagonals), and a pixel is water or land by the same
+// mask in both passes, so where the waves die away at the shore the two meet
+// without a seam. Vertices past (S + 1)^2 are a skirt hanging just below the
+// grid's border, over the hairline cracks against a neighbouring tile's grid.
+fn dense_water() -> bool { return T.info.y > 0.5; }
+// The waves fade out between these distances (m): world.rs draws the grid for
+// every tile with water nearer than the far one.
+const DENSE_FAR = vec2f(3500.0, 8000.0);
+
+@vertex fn vs_water(@builtin(vertex_index) vi: u32) -> VOut {
+  let S = u32(T.info.y);
+  let row = S + 1u;
+  var k = vi;
+  var skirt = false;
+  if (k >= row * row) {
+    // around the border: bottom, right, top, left
+    let r = k - row * row;
+    let o = r % S;
+    var ij = vec2u(0u, S - o);
+    switch (r / S) {
+      case 0u: { ij = vec2u(o, 0u); }
+      case 1u: { ij = vec2u(S, o); }
+      case 2u: { ij = vec2u(S - o, S); }
+      default: {}
+    }
+    k = ij.y * row + ij.x;
+    skirt = true;
+  }
+  // Where in the tile's cells, and on which of the cell's two triangles.
+  let g = vec2f(f32(k % row), f32(k / row)) * (f32(GRID) / f32(S));
+  let ci = min(u32(g.x), GRID - 1u);
+  let cj = min(u32(g.y), GRID - 1u);
+  let fa = g.x - f32(ci);
+  let fb = g.y - f32(cj);
+  let i00 = cj * GV + ci;
+  var v: CV;
+  if (fa + fb <= 1.0) {
+    let c00 = cv(i00);
+    let c10 = cv(i00 + 1u);
+    let c01 = cv(i00 + GV);
+    v = CV(c00.P + (c10.P - c00.P) * fa + (c01.P - c00.P) * fb, c00.depth + (c10.depth - c00.depth) * fa + (c01.depth - c00.depth) * fb, c00.N, c00.uv + (c10.uv - c00.uv) * fa + (c01.uv - c00.uv) * fb);
+  } else {
+    let c11 = cv(i00 + GV + 1u);
+    let c10 = cv(i00 + 1u);
+    let c01 = cv(i00 + GV);
+    let ga = 1.0 - fa;
+    let gb = 1.0 - fb;
+    v = CV(c11.P + (c01.P - c11.P) * ga + (c10.P - c11.P) * gb, c11.depth + (c01.depth - c11.depth) * ga + (c10.depth - c11.depth) * gb, c11.N, c11.uv + (c01.uv - c11.uv) * ga + (c10.uv - c11.uv) * gb);
+  }
+  var P = v.P;
+  let d = length(P);
+  let upn = normalize(P - G.planet.xyz);
+  let fade = 1.0 - smoothstep(DENSE_FAR.x, DENSE_FAR.y, d);
+  let m = textureSampleLevel(t_mask, s_clamp, v.uv, 1.0);
+  if (fade > 0.0 && m.r > 0.0) {
+    let shore = smoothstep(0.5, 1.0, textureSampleLevel(t_mask, s_clamp, v.uv, 3.0).r);
+    let st = sea_state(m.g * 255.0 / 80.0, upn.z, shore);
+    // Calm at the water's edge: from the shore distance field where it
+    // reaches (over a span that grows with the sea), else from the mask.
+    var calm = smoothstep(0.5, 1.0, m.r);
+    let sh = dense_shore(P);
+    if (sh >= 0.0) { calm = min(calm, smoothstep(1.5, 8.0 + 4.0 * G.ocean[1].y, sh)); }
+    // Filtered to the grid's spacing, or a little finer than the pixels far off.
+    let sp = max(T.offset.w * f32(GRID) / f32(S), d * 0.0025);
+    let w = ocean_disp(ocean_coord(P), sp, st) * (fade * calm);
+    P += G.east.xyz * w.x + G.north.xyz * w.y + upn * w.z;
+  }
+  if (skirt) { P -= upn * (0.5 + 0.004 * d); }
+  P += upn * crater_field(P).w;
+  return VOut(G.view_proj * vec4f(P, 1.0), P, v.N, v.uv, v.depth);
+}
+// Distance to land (m) from the shore field (shore.rs), or -1 off its square.
+fn dense_shore(P: vec3f) -> f32 {
+  if (G.shore.x < 0.5) { return -1.0; }
+  let q = G.shore_vp * vec4f(P, 1.0);
+  let uv = q.xy * vec2f(0.5, -0.5) + 0.5;
+  if (any(uv < vec2f(0.002)) || any(uv > vec2f(0.998))) { return -1.0; }
+  return textureSampleLevel(t_shore, s_clamp, uv, 0.0).x;
+}
+@fragment fn fs_water(in: VOut) -> GOut {
+  let img = textureSample(t_img, s_aniso, in.uv).rgb;
+  let m = textureSample(t_mask, s_clamp, in.uv);
+  if (m.r <= 0.5) { discard; }
+  let shore = smoothstep(0.5, 1.0, textureSampleLevel(t_mask, s_clamp, in.uv, 3.0).r);
+  return water_out(img, m, shore, in.depth);
+}
+
 // ------------------------------------------------------------ surface
 @fragment fn fs(in: VOut) -> GOut {
   // Derivatives first, while every pixel of the quad is still running.
@@ -654,11 +760,9 @@ fn relief(P: vec3f, N: vec3f, uv: vec2f, sp: f32) -> f32 {
   let m = textureSample(t_mask, s_clamp, in.uv);
   let shore = smoothstep(0.5, 1.0, textureSampleLevel(t_mask, s_clamp, in.uv, 3.0).r);
   if (m.r > 0.5) {
-    let wclass = round(m.g * 255.0 / 80.0);
-    // Bathymetry is coarse (and missing in bays): never shallower than a plausible shore profile.
-    let profile = 0.35 + shore * shore * select(select(9.0, 3.5, wclass > 2.5), 14.0, wclass < 1.5);
-    var depth = max(mix(min(in.depth, 1.2), in.depth, shore), profile);
-    return GOut(vec4f(img, 1.0), vec4f(max(depth, 0.15), wclass, shore, 1.0), 0.0);
+    // (drawn by fs_water instead)
+    if (dense_water()) { discard; }
+    return water_out(img, m, shore, in.depth);
   }
   // Inside the 3D tiles zone the mesh stands in for the land (tiles3d.rs);
   // our water stays, its waves and reflections over the mesh's still photo.

@@ -72,6 +72,10 @@ struct Globals {
   // (Low and Medium shadows) or 2 nine lookups (shadow_world).
   start: vec4f,
   snow: vec4f,       // falling snow: xyz direction the flakes stream from, w metres moved through them (composite.wgsl snowfall)
+  // The boat's wake (boat.rs `wake_rows`): x of row 0 the number of track
+  // points, newest (the transom now) first; each two rows: position
+  // (camera-relative) + age (s); speed (m/s), push 0..1, 0, 0.
+  wake: array<vec4f, 49>,
 };
 @group(0) @binding(0) var<uniform> G: Globals;
 @group(0) @binding(1) var t_trans: texture_2d<f32>;
