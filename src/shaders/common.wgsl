@@ -76,6 +76,10 @@ struct Globals {
   // points, newest (the transom now) first; each two rows: position
   // (camera-relative) + age (s); speed (m/s), push 0..1, 0, 0.
   wake: array<vec4f, 49>,
+  // The ships' wakes (ships.rs `wake_rows`), y of wake[0] how many; three
+  // rows each: the stern on the water (camera-relative) + beam (m); the way
+  // it heads (unit) + speed (m/s); hull length, wake length (m), 0, 0.
+  ships: array<vec4f, 24>,
 };
 @group(0) @binding(0) var<uniform> G: Globals;
 @group(0) @binding(1) var t_trans: texture_2d<f32>;
@@ -596,7 +600,7 @@ fn ocean_size(c: i32) -> f32 { return select(select(6.0, 250.0 / 6.0, c == 1), 2
 // `sea_state` mirrors it for the floating aircraft.
 fn sea_state(wclass: f32, sinlat: f32, shore: f32) -> vec3f {
   if (wclass > 2.5) { return vec3f(0.0, 0.1, 0.45); }   // river
-  if (wclass > 1.5) { return vec3f(0.05, 0.45, 0.85); } // lake
+  if (wclass > 1.5) { return select(vec3f(0.05, 0.45, 0.85), vec3f(0.0, 0.0, 0.12), G.ocean[1].w < 0.0); } // lake (calm: weather panel)
   let rough = 1.0 + 0.3 * smoothstep(0.55, 0.85, abs(sinlat));
   return vec3f(rough * mix(0.3, 1.0, shore), mix(0.75, 1.0, shore), 1.0);
 }

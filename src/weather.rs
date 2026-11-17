@@ -45,6 +45,38 @@ pub struct Weather {
     pub live_raw: String,
     /// the clock follows the real time and date (see `real_clock`)
     pub real_time: bool,
+    /// the sea: waves, swell, whitecaps, the water (the panel's SEA section)
+    pub sea: Sea,
+}
+
+/// The sea as set on the weather panel.
+#[derive(Clone, Copy, Debug)]
+pub struct Sea {
+    /// the wind sea follows the wind, or `hs` (significant height, m)
+    pub auto: bool,
+    pub hs: f64,
+    /// the swell its usual size and direction, or `swell` m from `swell_from` (compass degrees)
+    pub swell_auto: bool,
+    pub swell: f64,
+    pub swell_from: f64,
+    /// whitecaps, × the wind's
+    pub foam: f64,
+    /// 0 murky .. 0.5 usual .. 1 crystal clear
+    pub clarity: f64,
+    pub calm_lakes: bool,
+    /// the Storm slider's last setting (0..1)
+    pub storm: f32,
+}
+impl Default for Sea {
+    fn default() -> Self {
+        Self { auto: true, hs: 1.5, swell_auto: true, swell: 1.0, swell_from: 250.0, foam: 1.0, clarity: 0.5, calm_lakes: false, storm: 0.0 }
+    }
+}
+impl Sea {
+    /// What the ocean takes (ocean.rs `SeaSet`).
+    pub fn set(&self) -> crate::ocean::SeaSet {
+        crate::ocean::SeaSet { hs: (!self.auto).then_some(self.hs), swell: (!self.swell_auto).then_some((self.swell, self.swell_from)), foam: self.foam, clarity: 2f64.powf((self.clarity - 0.5) * 4.0), calm_lakes: self.calm_lakes }
+    }
 }
 
 /// What the air around the aircraft is doing beyond the mean wind.
@@ -129,7 +161,30 @@ fn cube_face(q: DVec3) -> (u32, DVec3, DVec3, DVec3) {
 impl Weather {
     pub fn new(clouds: f32) -> Self {
         // A light west-south-westerly, as the smoke always drifted before there was a slider for it.
-        Self { clouds, cloud_base: 1500.0, cloud_depth: 4500.0, storms: 0.2, alto: 0.25, snow: 0.0, haze: 1.0, wind: 4.0, wind_from: 248.0, gusts: 0.15, time_rate: 1.0, moon_age: 11.5, cloud_off: DVec3::ZERO, open: false, sun: 0.5, thermal_off: DVec3::ZERO, cells: Vec::new(), live: false, live_station: String::new(), live_raw: String::new(), real_time: false }
+        Self { clouds, cloud_base: 1500.0, cloud_depth: 4500.0, storms: 0.2, alto: 0.25, snow: 0.0, haze: 1.0, wind: 4.0, wind_from: 248.0, gusts: 0.15, time_rate: 1.0, moon_age: 11.5, cloud_off: DVec3::ZERO, open: false, sun: 0.5, thermal_off: DVec3::ZERO, cells: Vec::new(), live: false, live_station: String::new(), live_raw: String::new(), real_time: false, sea: Sea::default() }
+    }
+
+    /// The Storm slider: calm (0) to a full gale (1) in one move: wind and
+    /// gusts, cloud and storm cells, the waves, swell and whitecaps together.
+    /// Each can still be set on its own afterwards.
+    pub fn set_storm(&mut self, s: f32) {
+        let k = s.clamp(0.0, 1.0);
+        let kd = k as f64;
+        self.sea.storm = k;
+        self.wind = 1.0 + 24.0 * kd;
+        self.gusts = 0.05 + 0.75 * kd;
+        self.clouds = 0.15 + 0.85 * k;
+        self.cloud_base = 1600.0 - 1000.0 * k;
+        self.cloud_depth = 3000.0 + 4000.0 * k;
+        self.storms = 0.9 * k * k;
+        self.alto = 0.2 + 0.6 * k;
+        self.haze = 1.0 + 2.5 * k;
+        self.sea.auto = false;
+        self.sea.hs = 0.05 + 11.5 * kd.powf(1.6);
+        self.sea.swell_auto = false;
+        self.sea.swell = 0.3 + 5.5 * kd;
+        self.sea.swell_from = self.wind_from + 20.0;
+        self.sea.foam = 0.7 + 0.6 * kd;
     }
 
     /// Top of the cloud layer including any storm towers, metres.
@@ -361,7 +416,9 @@ impl Weather {
             .default_pos([14.0, 250.0])
             .show(ctx, |ui| {
                 ui.spacing_mut().slider_width = 200.0;
-                self.controls(ui, utc, doy, lon, false)
+                // (taller than the window, with the sea's section: it scrolls)
+                let h = ctx.content_rect().height() - 110.0;
+                egui::ScrollArea::vertical().max_height(h.max(200.0)).show(ui, |ui| self.controls(ui, utc, doy, lon, false));
             });
         self.open = open;
     }
@@ -378,6 +435,8 @@ impl Weather {
                 self.day_controls(&mut c[0], utc, doy, lon);
                 c[0].add_space(8.0);
                 c[0].add_enabled_ui(free, |ui| self.wind_controls(ui));
+                self.sea_controls(&mut c[1]);
+                c[1].add_space(8.0);
                 c[1].add_enabled_ui(free, |ui| {
                     self.sky_controls(ui);
                     ui.add_space(8.0);
@@ -385,14 +444,57 @@ impl Weather {
                 });
             });
         } else {
+            // (the sea first: the window is tall, and it is what changes most at sea)
+            self.sea_controls(ui);
             self.day_controls(ui, utc, doy, lon);
             ui.add_enabled_ui(free, |ui| {
                 self.sky_controls(ui);
                 self.wind_controls(ui);
+            });
+            ui.add_enabled_ui(free, |ui| {
                 ui.add_space(6.0);
                 self.presets(ui);
             });
         }
+    }
+
+    /// The sea: a Storm slider over everything, the waves (from the wind or
+    /// set), the swell, the whitecaps and the water. Real weather keeps
+    /// raising the waves from its wind unless they are set here.
+    fn sea_controls(&mut self, ui: &mut egui::Ui) {
+        let live = self.live;
+        section(ui, tr("SEA"), |ui| {
+            ui.label(t!("Storm", "Tempête"));
+            let mut st = self.sea.storm;
+            if ui.add_enabled_ui(!live, |ui| add(ui, Slider::new(&mut st, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)))).inner.changed() {
+                self.set_storm(st);
+            }
+            ui.end_row();
+            ui.label(t!("Waves", "Vagues"));
+            ui.checkbox(&mut self.sea.auto, t!("Auto (from the wind)", "Auto (selon le vent)"));
+            ui.end_row();
+            ui.label("");
+            ui.add_enabled_ui(!self.sea.auto, |ui| add(ui, Slider::new(&mut self.sea.hs, 0.0..=12.0).step_by(0.1).custom_formatter(|v, _| if v < 0.05 { t!("glassy", "miroir").into() } else { format!("{v:.1} m") })));
+            ui.end_row();
+            ui.label(t!("Swell", "Houle"));
+            ui.checkbox(&mut self.sea.swell_auto, t!("Auto", "Auto"));
+            ui.end_row();
+            ui.label("");
+            ui.add_enabled_ui(!self.sea.swell_auto, |ui| add(ui, Slider::new(&mut self.sea.swell, 0.0..=8.0).step_by(0.1).suffix(" m")));
+            ui.end_row();
+            ui.label(t!("Swell from", "Houle de"));
+            ui.add_enabled_ui(!self.sea.swell_auto, |ui| add(ui, Slider::new(&mut self.sea.swell_from, 0.0..=359.0).step_by(1.0).custom_formatter(|v, _| format!("{:03.0}° {}", v, tr(compass(v))))));
+            ui.end_row();
+            ui.label(t!("Whitecaps", "Moutons"));
+            add(ui, Slider::new(&mut self.sea.foam, 0.0..=2.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+            ui.end_row();
+            ui.label(t!("Water", "Eau"));
+            add(ui, Slider::new(&mut self.sea.clarity, 0.0..=1.0).custom_formatter(|v, _| (if v < 0.2 { t!("murky", "trouble") } else if v < 0.4 { t!("cloudy", "voilée") } else if v < 0.62 { t!("usual", "normale") } else if v < 0.85 { t!("clear", "claire") } else { t!("crystal clear", "cristalline") }).into()));
+            ui.end_row();
+            ui.label("");
+            ui.checkbox(&mut self.sea.calm_lakes, t!("Calm lakes", "Lacs calmes"));
+            ui.end_row();
+        });
     }
 
     /// The real-weather switch, and where the report comes from.
@@ -421,6 +523,7 @@ impl Weather {
             self.sky_controls(ui);
             self.wind_controls(ui);
         });
+        self.sea_controls(ui);
     }
 
     /// The start screen's time: local time of day and the date.

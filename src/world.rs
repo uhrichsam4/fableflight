@@ -223,6 +223,9 @@ pub struct World {
     /// Water High: the water near the camera drawn as fine grids the waves
     /// stand up on (terrain.wgsl `vs_water`)
     pub dense_water: bool,
+    /// the decks of the ships near the aircraft, as they are this step
+    /// (ships.rs): what its wheels and airframe can touch at sea
+    pub decks: crate::ships::Decks,
 }
 
 #[derive(Clone)]
@@ -242,7 +245,7 @@ impl Frustum {
 impl World {
     pub fn new(loader: Loader, max_zoom: u8) -> Self {
         let photo = Some(Box::new(crate::tiles3d::Photo::new(loader.src.google.clone(), Some(loader.src.clone()))));
-        Self { photo, flat: None, loader, tiles: HashMap::new(), builds: HashMap::new(), frame: 0, in_flight: 0, max_zoom, lod_k: 0.62, buildings_on: true, draw: Vec::new(), draw_shore: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), last_update: None, uploads: VecDeque::new(), fields: HashMap::new(), ocean: crate::ocean::Ocean::new(), dense_water: false }
+        Self { photo, flat: None, loader, tiles: HashMap::new(), builds: HashMap::new(), frame: 0, in_flight: 0, max_zoom, lod_k: 0.62, buildings_on: true, draw: Vec::new(), draw_shore: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), last_update: None, uploads: VecDeque::new(), fields: HashMap::new(), ocean: crate::ocean::Ocean::new(), dense_water: false, decks: crate::ships::Decks::default() }
     }
 
     /// Height of the ground (or water surface) at a lat/lon: the top of the
@@ -448,7 +451,9 @@ impl World {
                 let s = |i: usize, j: usize, c: usize| t.sea[j * GV + i][c];
                 let sea = |c: usize| ((s(x0, y0, c) * (1.0 - fx) + s(x0 + 1, y0, c) * fx) * (1.0 - fy) + (s(x0, y0 + 1, c) * (1.0 - fx) + s(x0 + 1, y0 + 1, c) * fx) * fy) as f64;
                 let sea = [sea(0), sea(1)];
-                if w && sea[0] + sea[1] > 0.0 {
+                // (lakes and rivers: little of the long cascades; still with the lakes calm)
+                let calm = self.ocean.set.calm_lakes && sea[0] < 0.2;
+                if w && sea[0] + sea[1] > 0.0 && !calm {
                     h += self.ocean.height_w(geo::lla_to_pos(lat, lon, h), sea);
                 }
                 if !self.craters.is_empty() {

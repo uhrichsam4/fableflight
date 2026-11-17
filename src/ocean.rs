@@ -205,7 +205,37 @@ fn ifft(a: &mut [[f64; 2]]) {
     }
 }
 
+/// The sea as the weather panel sets it (weather.rs `Sea`): the wind sea's
+/// significant height (None: from the wind), the swell's height and the
+/// compass direction it comes from (None: the usual one), how much of it
+/// whitecaps (×), the water's clarity (×, 1 normal) and calm lakes.
+#[derive(Clone, Copy, Debug)]
+pub struct SeaSet {
+    pub hs: Option<f64>,
+    pub swell: Option<(f64, f64)>,
+    pub foam: f64,
+    pub clarity: f64,
+    pub calm_lakes: bool,
+}
+impl Default for SeaSet {
+    fn default() -> Self {
+        Self { hs: None, swell: None, foam: 1.0, clarity: 1.0, calm_lakes: false }
+    }
+}
+
+/// Zeroth moment (variance, m²) of the JONSWAP spectrum.
+fn jonswap_m0(wp: f64, alpha: f64, gamma: f64) -> f64 {
+    let (a, b) = ((0.3 * wp).ln(), (10.0 * wp).ln());
+    let n = 400;
+    (0..n).map(|i| {
+        let w = (a + (b - a) * (i as f64 + 0.5) / n as f64).exp();
+        jonswap(w, wp, alpha, gamma) * w * (b - a) / n as f64
+    }).sum()
+}
+
 pub struct Ocean {
+    /// the sea's settings (weather panel)
+    pub set: SeaSet,
     /// texels across each cascade (`grid`)
     n: usize,
     /// smoothed wind (m/s) and the direction it blows toward (east, north)
@@ -251,6 +281,7 @@ impl Ocean {
         noise0.truncate(CPU_C * N * N);
         let dir = DVec2::new(1.0, 0.0);
         Self {
+            set: SeaSet::default(),
             n: N,
             wind: 5.0,
             dir,
@@ -292,23 +323,43 @@ impl Ocean {
     pub fn update(&mut self, dt: f64, time: f64, wind: f64, wind_from: f64, sinlat: f64, cam: DVec3, east: DVec3, north: DVec3, off: DVec2) {
         let to = (wind_from + 180.0).to_radians();
         let target = DVec2::new(to.sin(), to.cos());
+        // Waves set by hand: the wind that raises a sea that high (fully
+        // developed, Pierson-Moskowitz: Hs = 0.21 U² / g) shapes it, and its
+        // energy is then scaled to the height asked for.
+        let wind = match self.set.hs {
+            Some(h) => (h.max(0.0) * GRAV / 0.21).sqrt().clamp(0.5, 40.0),
+            None => wind,
+        };
+        let swell_to = self.set.swell.map(|(_, from)| {
+            let a = (from + 180.0).to_radians();
+            DVec2::new(a.sin(), a.cos())
+        });
         if !self.started {
             self.started = true;
             self.wind = wind;
             self.dir = target;
-            self.sdir = DVec2::from_angle(0.6).rotate(target);
+            self.sdir = swell_to.unwrap_or_else(|| DVec2::from_angle(0.6).rotate(target));
         } else {
             // The sea takes a while to answer the wind.
             let k = (dt / 20.0).clamp(0.0, 1.0);
             self.wind += (wind - self.wind) * k;
             self.dir = (self.dir + (target - self.dir) * k).try_normalize().unwrap_or(target);
-            let ks = (dt / 600.0).clamp(0.0, 1.0);
-            let st = DVec2::from_angle(0.6).rotate(target);
+            let ks = (dt / if swell_to.is_some() { 10.0 } else { 600.0 }).clamp(0.0, 1.0);
+            let st = swell_to.unwrap_or_else(|| DVec2::from_angle(0.6).rotate(target));
             self.sdir = (self.sdir + (st - self.sdir) * ks).try_normalize().unwrap_or(st);
         }
         // The southern ocean and the far north run a bigger swell.
-        let swell_hs = 0.7 + 0.6 * smoothstep(0.55, 0.85, sinlat.abs()) + 0.02 * self.wind;
+        let swell_hs = match self.set.swell {
+            Some((h, _)) => h.max(0.0),
+            None => 0.7 + 0.6 * smoothstep(0.55, 0.85, sinlat.abs()) + 0.02 * self.wind,
+        };
         self.spec = Spec::new(self.wind, self.dir, self.sdir, swell_hs);
+        if let Some(h) = self.set.hs {
+            // (the smoothed wind's sea, brought to the height asked for)
+            let want = (h.max(0.0) / 4.0).powi(2);
+            let m0 = jonswap_m0(self.spec.wp, self.spec.alpha, self.spec.gamma).max(1e-9);
+            self.spec.alpha *= want / m0;
+        }
         self.t = time.rem_euclid(PERIOD);
         self.dt = dt.max(0.0);
         self.cam = cam;
@@ -611,10 +662,11 @@ impl Ocean {
     pub fn globals(&self) -> [[f32; 4]; OCEAN_G] {
         let u = self.wind;
         // Whitecap cover (Monahan & O'Muircheartaigh 1980).
-        let wc = (3.84e-6 * u.max(0.0).powf(3.41)).min(0.3);
+        let wc = ((3.84e-6 * u.max(0.0).powf(3.41)).min(0.3) * self.set.foam).min(0.45);
         let mut g = [[0f32; 4]; OCEAN_G];
         g[0] = [self.off.x as f32, self.off.y as f32, self.dir.x as f32, self.dir.y as f32];
-        g[1] = [u as f32, self.hs as f32, wc as f32, 1.0];
+        // (w: the water's clarity, negative with the lakes calm)
+        g[1] = [u as f32, self.hs as f32, wc as f32, self.set.clarity.max(0.05) as f32 * if self.set.calm_lakes { -1.0 } else { 1.0 }];
         // (w: the finest level the GPU writes, which the shaders read no finer than)
         g[2] = [self.ripple[0], self.ripple[1], self.ripple[2], (N / self.n).trailing_zeros() as f32];
         for c in 0..3 {

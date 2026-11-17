@@ -216,6 +216,8 @@ pub struct Scene<'a> {
     pub route: &'a Route,
     /// live traffic: lat, lon (degrees), heading (degrees)
     pub traffic: Vec<(f64, f64, f64)>,
+    /// the big ships (ships.rs): lat, lon, heading (degrees), length (m), name
+    pub ships: Vec<(f64, f64, f64, f64, String)>,
 }
 
 /// Airports near a view, looked up again only when it has moved or zoomed.
@@ -577,6 +579,20 @@ fn layers(painter: &egui::Painter, v: &View, s: &Scene, apts: &[u32], max_labels
         let side = vec2(-f.y, f.x);
         let pts = vec![p + f * 6.0, p - f * 4.0 + side * 4.0, p - f * 2.0, p - f * 4.0 - side * 4.0];
         painter.add(egui::Shape::convex_polygon(pts, TRAFFIC, Stroke::new(0.8, Color32::from_black_alpha(200))));
+    }
+    // ships: a hull outline to scale (never smaller than an icon), named
+    for (la, lo, h, len, name) in &s.ships {
+        let p = v.at(*la, *lo);
+        if !r.contains(p) {
+            continue;
+        }
+        let f = v.dir(*h);
+        let side = vec2(-f.y, f.x);
+        let l = ((len / v.mpp()) as f32 * 0.5).max(7.0);
+        let w = l * 0.22;
+        let pts = vec![p + f * l, p + f * (l * 0.45) + side * w, p - f * l + side * w * 0.8, p - f * l - side * w * 0.8, p + f * (l * 0.45) - side * w];
+        painter.add(egui::Shape::convex_polygon(pts, Color32::from_rgb(235, 240, 245), Stroke::new(1.2, Color32::from_rgb(20, 60, 110))));
+        text(p + vec2(0.0, l.min(30.0) + 4.0), Align2::CENTER_TOP, name, 11.0, Color32::from_rgb(200, 225, 255));
     }
     // the aircraft
     let p = v.at(s.lat, s.lon);

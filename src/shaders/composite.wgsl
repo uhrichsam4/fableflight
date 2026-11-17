@@ -289,60 +289,159 @@ fn breakers(wc: vec2f, sh: ShoreAt, wclass: f32, fp: f32, t: f32) -> Surf {
   return o;
 }
 
-// The wake at P: x foam 0..1, y aeration (water milky with bubbles).
-fn wake_at(P: vec3f, upn: vec3f, e: vec3f, n: vec3f, wc: vec2f, fp: f32) -> vec2f {
-  let cnt = i32(G.wake[0].x);
-  if (cnt < 2) { return vec2f(0.0); }
-  let flat = vec2f(dot(P, e), dot(P, n));
-  // Far from the whole track (its points, and the wedge they fan out to): nothing.
-  let a0 = G.wake[1].xyz;
-  let span = f32(cnt) * 30.0;
-  if (length(flat - vec2f(dot(a0, e), dot(a0, n))) > span * 0.45 + 40.0) { return vec2f(0.0); }
-  let nA = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 6.5, 0.31), 0.0);
-  let nB = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 1.9, 0.77), 0.0);
-  let lace = mix(nA.r * 0.6 + nB.g * 0.5, 0.55, smoothstep(0.1, 0.6, fp));
-  var foam = 0.0;
-  var aer = 0.0;
-  var s0 = 0.0;
-  for (var i = 0; i < cnt - 1; i++) {
-    let ra = G.wake[1 + 2 * i];
-    let rb = G.wake[3 + 2 * i];
-    let qa = G.wake[2 + 2 * i];
-    let qb = G.wake[4 + 2 * i];
-    let a = vec2f(dot(ra.xyz, e), dot(ra.xyz, n));
-    let b = vec2f(dot(rb.xyz, e), dot(rb.xyz, n));
-    let ab = b - a;
-    let L = max(length(ab), 1e-3);
-    let dir = ab / L;
-    let rel = flat - a;
-    let t = dot(rel, dir);
-    let tc = clamp(t, 0.0, L);
-    let k = tc / L;
-    let d = abs(rel.x * dir.y - rel.y * dir.x);
-    let s = s0 + tc;
-    s0 += L;
-    // (beyond either end of an inner segment the next one takes over)
-    if ((t < 0.0 && i > 0) || (t > L && i < cnt - 2)) { continue; }
-    let age = mix(ra.w, rb.w, k);
-    let spd = mix(qa.x, qb.x, k);
-    let push = mix(qa.y, qb.y, k);
-    // Behind the transom: a white boil, the propeller's wash, widening and
-    // breaking up into lace as it ages.
-    let w = 0.9 + 0.35 * min(spd, 20.0) * 0.1 + 0.55 * pow(age, 0.7);
-    let fresh = exp(-age / 3.0);
-    let wash = exp(-pow(d / w, 2.0)) * smoothstep(1.0, 5.0, spd) * (0.25 + 0.75 * push) * exp(-age / 20.0);
-    let ends = smoothstep(-1.0, 0.5, t) * select(1.0, smoothstep(L + 1.5, L - 0.5, t), i == cnt - 2);
-    foam = max(foam, clamp(wash * (0.6 + 0.8 * fresh) - (1.0 - lace) * (1.0 - fresh) * 0.55, 0.0, 1.0) * ends);
-    aer = max(aer, wash * 0.9 * ends);
-    // The Kelvin arms: crests at 19.5 degrees off the track, a thin white
-    // line where the boat throws them up, softer and fading further back.
-    let arm = 0.354 * s;
-    let aw = 0.25 + 0.018 * s;
-    let ka = exp(-pow((d - arm) / aw, 2.0)) * smoothstep(3.0, 10.0, spd) * exp(-age / 9.0) * smoothstep(1.0, 4.0, s);
-    foam = max(foam, clamp(ka * (0.25 + 1.1 * lace) - 0.3 - 0.4 * (1.0 - exp(-age / 3.0)), 0.0, 1.0) * ends);
-    aer = max(aer, ka * 0.4 * ends);
+// Wakes: the speedboat's track (boat.rs `wake_rows`) and the ships' straight
+// ones (ships.rs `wake_rows`). What the water does there: foam 0..1, aeration
+// (milky with bubbles), and the slope of the Kelvin wave crests (east, north).
+struct Wake {
+  foam: f32,
+  aer: f32,
+  slope: vec2f,
+};
+
+// One wake at a point `sd` (m, signed) off its line and `s` behind the stern
+// (negative: alongside the hull, `hull` long), where the water was churned
+// `age` s ago by a hull `beam` wide going `spd` m/s, pushing `push` (0..1).
+// `q`: coordinates on the water along and across the track (fixed to it).
+fn wake_one(sd: f32, s: f32, age: f32, spd: f32, push: f32, beam: f32, hull: f32, q: vec2f, fp: f32) -> Wake {
+  var o: Wake;
+  o.foam = 0.0;
+  o.aer = 0.0;
+  o.slope = vec2f(0.0);
+  let d = abs(sd);
+  let big = clamp(beam / 2.4, 1.0, 60.0);       // 1 the speedboat, ~17 a carrier
+  let go = smoothstep(1.0, 4.0, spd);
+  // Behind the stern: the propellers' turbulent churn, about as wide as the
+  // hull, spreading slowly and breaking up from a solid boil into streaks of
+  // lace and then a long thinning line of foam.
+  let w = beam * 0.5 + 0.03 * max(s, 0.0) + 0.3 * sqrt(big * max(age, 0.0));
+  let core = exp(-pow(d / w, 2.0)) * smoothstep(-0.5 * big, 0.3 * big, s);
+  let fresh = exp(-age / (2.5 + 1.5 * big));
+  let fade = exp(-age / (7.0 + 6.0 * big)) * go * (0.3 + 0.7 * push);
+  // Noise fixed to the water, stretched along the track: streaks.
+  let sc = sqrt(big);
+  let nS = textureSampleLevel(t_noise, s_repeat, vec3f(q.x / (11.0 * sc), q.y / (1.6 * sc), 0.43), 0.0);
+  let nL = textureSampleLevel(t_noise, s_repeat, vec3f(q / (2.2 * sc), 0.71), 0.0);
+  let nF = textureSampleLevel(t_noise, s_repeat, vec3f(q / 0.7, 0.19), 0.0);
+  // (the noise volume has no mips: far off, its mean)
+  let far = smoothstep(0.12 * sc, 0.9 * sc, fp);
+  var pat = smoothstep(0.22, 0.78, nS.r * 0.5 + nL.g * 0.35 + mix(nF.b, 0.5, smoothstep(0.05, 0.3, fp)) * 0.25);
+  pat = mix(pat, 0.5, far);
+  // How much of the water there is white: all of it in the boil, then less
+  // and less, toward the middle of the track.
+  let churn = core * fade;
+  // (a big ship's churn is turquoise more than white across its width)
+  let cover = clamp(churn * (0.16 + 0.9 * fresh) / (1.0 + 0.02 * big) - 0.04, 0.0, 1.0);
+  let edge = mix(0.07, 0.3, far);
+  o.foam = smoothstep(1.0 - cover - edge, 1.0 - cover + edge, pat) * smoothstep(0.0, 0.08, cover);
+  o.aer = core * go * exp(-age / (25.0 + 4.0 * big)) * (0.35 + 0.65 * fresh);
+  // The Kelvin wedge: crests running out at 19.5 degrees either side from
+  // the bow, a ridge of water you see by its slope, thin broken foam on it
+  // close behind the boat where it breaks.
+  let sb = s + hull;
+  if (sb > 0.0) {
+    let arm = 0.354 * sb;
+    let aw = (0.7 + 0.035 * sb) * mix(1.0, 0.45, smoothstep(10.0, 40.0, big)) + 0.25 * big;
+    let x = (d - arm) / aw;
+    let amp = (0.3 * big + 0.25) * smoothstep(2.0, 10.0, spd) * exp(-age / (20.0 + 4.0 * big)) * exp(-sb / min(3.0 * hull + 300.0, 2500.0)) / (1.0 + sb / (60.0 * big));
+    let ridge = exp(-x * x);
+    // dh/dd of a Gaussian ridge, and a gentler trough on its inside
+    let dhd = amp * (-2.0 * x / aw) * ridge + amp * 0.6 * (2.0 * (x + 1.6) / (aw * 1.5)) * exp(-pow((x + 1.6) / 1.5, 2.0)) * 0.5;
+    o.slope = vec2f(dhd * sign(sd), 0.0);
+    // (white only where the crest breaks: close behind the bow, thin)
+    let ka = exp(-x * x * 4.0) * smoothstep(6.0, 16.0, spd) * exp(-sb / (14.0 * big));
+    let ac = clamp(ka * 0.8 - 0.1, 0.0, 1.0);
+    let lace = mix(smoothstep(0.25, 0.75, nL.b * 0.6 + nF.g * 0.5), 0.5, far);
+    o.foam = max(o.foam, smoothstep(1.0 - ac - 0.08, 1.0 - ac + 0.08, lace) * smoothstep(0.0, 0.1, ac));
+    o.aer = max(o.aer, ka * 0.2);
   }
-  return vec2f(foam, aer);
+  return o;
+}
+
+fn wake_at(P: vec3f, e: vec3f, n: vec3f, wc: vec2f, fp: f32) -> Wake {
+  var o: Wake;
+  o.foam = 0.0;
+  o.aer = 0.0;
+  o.slope = vec2f(0.0);
+  let flat = vec2f(dot(P, e), dot(P, n));
+  // The speedboat's track: the segment nearest the point.
+  let cnt = i32(G.wake[0].x);
+  if (cnt >= 2) {
+    let a0 = G.wake[1].xyz;
+    let span = f32(cnt) * 30.0;
+    if (length(flat - vec2f(dot(a0, e), dot(a0, n))) < span * 0.45 + 60.0) {
+      var best = 1e9;
+      var bsd = 0.0;
+      var bs = 0.0;
+      var bage = 0.0;
+      var bq = vec2f(0.0);
+      var bdir = vec2f(1.0, 0.0);
+      var s0 = 0.0;
+      for (var i = 0; i < cnt - 1; i++) {
+        let ra = G.wake[1 + 2 * i];
+        let rb = G.wake[3 + 2 * i];
+        let a = vec2f(dot(ra.xyz, e), dot(ra.xyz, n));
+        let b = vec2f(dot(rb.xyz, e), dot(rb.xyz, n));
+        let ab = b - a;
+        let L = max(length(ab), 1e-3);
+        let dir = ab / L;
+        let rel = flat - a;
+        let t = dot(rel, dir);
+        // (beyond either end of an inner segment the next one takes over;
+        // ahead of the transom only as far as the bow)
+        let lo = select(0.0, -8.0, i == 0);
+        let hi = select(L, L + 2.0, i == cnt - 2);
+        if (t < lo || t > hi) { s0 += L; continue; }
+        let sd = rel.x * dir.y - rel.y * dir.x;
+        if (abs(sd) < best) {
+          best = abs(sd);
+          bsd = sd;
+          let k = clamp(t / L, 0.0, 1.0);
+          bs = s0 + t;
+          bage = mix(ra.w, rb.w, k);
+          bq = vec2f(mix(G.wake[2 + 2 * i].x, G.wake[4 + 2 * i].x, k), mix(G.wake[2 + 2 * i].y, G.wake[4 + 2 * i].y, k));
+          bdir = dir;
+        }
+        s0 += L;
+      }
+      if (best < 1e8) {
+        let q = vec2f(dot(wc, bdir), dot(wc, vec2f(bdir.y, -bdir.x)));
+        // (the end of the track: gone)
+        let tail = 1.0 - smoothstep(s0 - 6.0, s0 + 2.0, bs);
+        var wk = wake_one(bsd, bs, bage, bq.x, bq.y, 2.4, 7.4, q, fp);
+        wk.foam *= tail;
+        wk.aer *= tail;
+        wk.slope *= tail;
+        // (the track's direction away from the boat, for the crest slopes)
+        o.foam = max(o.foam, wk.foam);
+        o.aer = max(o.aer, wk.aer);
+        o.slope += vec2f(bdir.y, -bdir.x) * wk.slope.x;
+      }
+    }
+  }
+  // The ships: straight tracks behind each.
+  let ns = i32(G.wake[0].y);
+  for (var i = 0; i < ns; i++) {
+    let r0 = G.ships[3 * i];
+    let r1 = G.ships[3 * i + 1];
+    let r2 = G.ships[3 * i + 2];
+    let st = vec2f(dot(r0.xyz, e), dot(r0.xyz, n));
+    let fwd = normalize(vec2f(dot(r1.xyz, e), dot(r1.xyz, n)) + vec2f(1e-6, 0.0));
+    let dir = -fwd;
+    let rel = flat - st;
+    let s = dot(rel, dir);
+    let sd = rel.x * dir.y - rel.y * dir.x;
+    let hull = r2.x;
+    let wl = r2.y;
+    if (s < -hull || s > wl || abs(sd) > 0.4 * (s + hull) + r0.w * 2.0 + 30.0) { continue; }
+    let q = vec2f(dot(wc, dir), dot(wc, vec2f(dir.y, -dir.x)));
+    let spd = max(r1.w, 0.1);
+    var wk = wake_one(sd, s, max(s, 0.0) / spd, spd, 0.8, r0.w, hull, q, fp);
+    let tail = 1.0 - smoothstep(wl * 0.6, wl, s);
+    o.foam = max(o.foam, wk.foam * tail);
+    o.aer = max(o.aer, wk.aer * tail);
+    o.slope += vec2f(dir.y, -dir.x) * wk.slope.x * tail;
+  }
+  return o;
 }
 
 fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> vec3f {
@@ -463,6 +562,10 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   var slope = vec2f(sl.x * jyy - sl.y * jd.z, sl.y * jxx - sl.x * jd.z) / max(J, 0.25) + surf.slope;
   let smag = length(slope);
   if (smag > 1.5) { slope *= 1.5 / smag; }
+  // Wakes (boat.rs, ships.rs): the churned track is a slick, its chop
+  // smoothed away; the Kelvin crests tilt the surface.
+  let wk = wake_at(P, e, n, wc, fp);
+  slope = slope * (1.0 - 0.35 * clamp(wk.aer * 1.5, 0.0, 1.0)) + wk.slope;
   let J01 = (1.0 + jd01.x) * (1.0 + jd01.y) - jd01.z * jd01.z;
   let N = normalize(upn - e * slope.x - n * slope.y);
   // (the march for reflected scenery leaves out the swell's long, even
@@ -578,7 +681,10 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   else if (wclass > 1.5) { turb = 1.0; body = vec3f(0.0016, 0.0046, 0.004); weedy = 1.1; }
   let tl = max(luma(tint), 0.015);
   body = mix(body, tint / tl * luma(body), 0.3);
-  let ext = vec3f(0.36, 0.052, 0.024) + vec3f(0.22, 0.2, 0.3) * turb;
+  // (the weather panel's clarity: murkier water absorbs and scatters more)
+  let clar = clamp(abs(G.ocean[1].w), 0.05, 20.0);
+  body *= pow(1.0 / clar, 0.35);
+  let ext = (vec3f(0.36, 0.052, 0.024) + vec3f(0.22, 0.2, 0.3) * turb) / clar;
 
   // Refraction down to the bed.
   let Rf = refract(V, N, 0.75);
@@ -681,16 +787,15 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   // The boat's wake (boat.rs): white water churned up behind the transom
   // that spreads and fades along its track, and the two arms of the Kelvin
   // wedge running out at 19.5 degrees either side, white near the boat.
-  let wk = wake_at(P, upn, e, n, wc, fp);
-  aer = max(aer, wk.y);
-  foam = max(foam, wk.x * fnear);
+  aer = max(aer, wk.aer);
+  foam = max(foam, wk.foam * fnear);
   // Foam is bubbles, not paint: holes and lace within it, close up.
   let bub = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 2.1, 0.2 + t * 0.04), 0.0);
   let bub2 = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 0.55, 0.6), 0.0);
   let holes = smoothstep(0.3, 0.65, bub.r * 0.6 + bub2.g * 0.5);
   foam *= mix(1.0, 0.45 + 0.7 * holes, 1.0 - smoothstep(0.04, 0.2, fp));
   // (bubbles just under the surface: the water pale and milky green)
-  col = mix(col, vec3f(0.12, 0.26, 0.25) * (l.sun * (0.3 + 0.7 * mu) / PI + l.amb), aer * 0.55 * fnear);
+  col = mix(col, vec3f(0.15, 0.25, 0.27) * (l.sun * (0.3 + 0.7 * mu) / PI + l.amb), aer * 0.55 * fnear);
   col = mix(col, vec3f(0.78, 0.8, 0.8) * (0.85 + 0.3 * bub2.b) * (l.sun * (0.4 + 0.6 * mu) / PI + l.amb), foam);
   return max(col, vec3f(0.0));
 }

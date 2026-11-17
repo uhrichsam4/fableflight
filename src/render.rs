@@ -157,9 +157,14 @@ pub struct Globals {
     /// the boat's wake (boat.rs `Boat::wake_rows`): count, then two rows a
     /// track point, newest first
     pub wake: [[f32; 4]; WAKE_ROWS],
+    /// the ships' wakes (ships.rs `wake_rows`; their count in wake[0][1]):
+    /// three rows a ship
+    pub ships: [[f32; 4]; SHIP_ROWS],
 }
 /// Rows of `Globals::wake`.
 pub const WAKE_ROWS: usize = 1 + 2 * 24;
+/// Rows of `Globals::ships`: three for each of the nearest ships.
+pub const SHIP_ROWS: usize = 3 * 8;
 
 /// The cloud shadow map: the sun's view of the cloud layer (common.wgsl
 /// `cloud_sun`). Each texel is a ray along the sun from a point on the cloud

@@ -391,7 +391,7 @@ impl Boat {
         // speed, thrown out sideways and back. Its rate and size grow with speed.
         let spd = self.speed().max(0.0);
         if self.wet > 0.01 && spd > 4.0 {
-            self.spray_acc += h * (spd - 4.0) * 5.0;
+            self.spray_acc += h * (spd - 4.0) * 9.0;
             let fwd = self.forward();
             while self.spray_acc >= 1.0 {
                 self.spray_acc -= 1.0;
@@ -402,7 +402,9 @@ impl Boat {
                 let tz = t_of(z);
                 let at = self.pos + self.rot * DVec3::new(sgn * chine_w(tz) * 1.02, chine_y(tz) + 0.05, z);
                 let out = right * sgn;
-                let vel = self.vel * 0.55 + out * (2.0 + 0.22 * spd) * (0.7 + 0.6 * k) + up * (1.5 + 0.12 * spd) * (0.6 + 0.8 * (1.0 - k)) - fwd * (0.1 * spd);
+                // (sheets thrown out low and sideways, then falling back: a few
+                // tenths of a second in the air, a metre or two out)
+                let vel = self.vel * 0.8 + out * (1.6 + 0.16 * spd) * (0.7 + 0.6 * k) + up * (1.0 + 0.07 * spd) * (0.6 + 0.8 * (1.0 - k)) - fwd * (0.05 * spd);
                 self.spray.push((at, vel, (spd / 20.0).min(1.0) as f32));
             }
         }
@@ -467,24 +469,24 @@ pub const TAA_BOX: [[f32; 4]; 2] = [[0.0, 0.25, ((BOW + STERN + 0.6) * 0.5) as f
 
 // ------------------------------------------------------------------ model
 
-type Mesh = (Vec<MeshVertex>, Vec<u32>);
+pub(crate) type Mesh = (Vec<MeshVertex>, Vec<u32>);
 
 /// inst.wgsl's materials: paint takes the instance tint, glass, lights, trim as coloured.
-const PAINT: f32 = 0.0;
-const LAMP: f32 = 0.25;
-const GLASS: f32 = 0.5;
-const TAIL: f32 = 0.75;
-const TRIM: f32 = 1.0;
+pub(crate) const PAINT: f32 = 0.0;
+pub(crate) const LAMP: f32 = 0.25;
+pub(crate) const GLASS: f32 = 0.5;
+pub(crate) const TAIL: f32 = 0.75;
+pub(crate) const TRIM: f32 = 1.0;
 
 #[derive(Default)]
-struct MB {
-    v: Vec<MeshVertex>,
-    i: Vec<u32>,
+pub(crate) struct MB {
+    pub(crate) v: Vec<MeshVertex>,
+    pub(crate) i: Vec<u32>,
 }
 
 impl MB {
     /// A grid of points (rows of equal length) as one smooth surface.
-    fn grid(&mut self, rows: &[Vec<Vec3>], col: [f32; 3], mat: f32, flip: bool) {
+    pub(crate) fn grid(&mut self, rows: &[Vec<Vec3>], col: [f32; 3], mat: f32, flip: bool) {
         let base = self.v.len() as u32;
         let nr = rows.len();
         let nc = rows[0].len();
@@ -512,7 +514,7 @@ impl MB {
         }
     }
     /// A flat polygon (convex, in order), one normal.
-    fn poly(&mut self, pts: &[Vec3], col: [f32; 3], mat: f32) {
+    pub(crate) fn poly(&mut self, pts: &[Vec3], col: [f32; 3], mat: f32) {
         let base = self.v.len() as u32;
         let n = (pts[1] - pts[0]).cross(pts[2] - pts[0]).normalize_or_zero();
         for p in pts {
@@ -523,7 +525,7 @@ impl MB {
         }
     }
     /// A box between two corners, faceted.
-    fn cube(&mut self, lo: Vec3, hi: Vec3, col: [f32; 3], mat: f32) {
+    pub(crate) fn cube(&mut self, lo: Vec3, hi: Vec3, col: [f32; 3], mat: f32) {
         let c = |x: bool, y: bool, z: bool| Vec3::new(if x { hi.x } else { lo.x }, if y { hi.y } else { lo.y }, if z { hi.z } else { lo.z });
         let faces = [
             [c(true, false, false), c(true, true, false), c(true, true, true), c(true, false, true)],
@@ -538,7 +540,7 @@ impl MB {
         }
     }
     /// A tube along a polyline (closed ring of `k` sides), radius `r`.
-    fn tube(&mut self, path: &[Vec3], r: f32, k: usize, col: [f32; 3], mat: f32) {
+    pub(crate) fn tube(&mut self, path: &[Vec3], r: f32, k: usize, col: [f32; 3], mat: f32) {
         let mut rows = Vec::new();
         for (i, p) in path.iter().enumerate() {
             let d = if i + 1 < path.len() { path[i + 1] - *p } else { *p - path[i - 1] }.normalize();
@@ -549,7 +551,39 @@ impl MB {
         }
         self.grid(&rows, col, mat, false);
     }
-    fn done(self) -> Mesh {
+    /// A box between two corners with its upright edges and top edges
+    /// rounded (radius `r`), smooth-shaded; open underneath.
+    pub(crate) fn rbox(&mut self, lo: Vec3, hi: Vec3, r: f32, col: [f32; 3], mat: f32) {
+        let (hx, hz) = ((hi.x - lo.x) * 0.5, (hi.z - lo.z) * 0.5);
+        let r = r.min(hx * 0.95).min(hz * 0.95).min((hi.y - lo.y) * 0.95).max(0.001);
+        let c = Vec3::new((lo.x + hi.x) * 0.5, 0.0, (lo.z + hi.z) * 0.5);
+        const K: usize = 4;
+        // A rounded rectangle `inset` in from the sides, at height y.
+        let ring = |inset: f32, y: f32| -> Vec<Vec3> {
+            let rc = (r - inset).max(0.0);
+            let (ax, az) = (hx - inset - rc, hz - inset - rc);
+            let mut pts = Vec::new();
+            for (q, (sx, sz)) in [(1.0f32, 1.0f32), (-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0)].iter().enumerate() {
+                for k in 0..=K {
+                    let a = (q as f32 + k as f32 / K as f32) * std::f32::consts::FRAC_PI_2;
+                    pts.push(c + Vec3::new(sx * ax + rc * a.cos(), y, sz * az + rc * a.sin()));
+                }
+            }
+            pts.push(pts[0]);
+            pts
+        };
+        let mut rows = vec![ring(0.0, lo.y), ring(0.0, hi.y - r)];
+        for k in 1..=K {
+            let a = k as f32 / K as f32 * std::f32::consts::FRAC_PI_2;
+            rows.push(ring(r * (1.0 - a.cos()), hi.y - r + r * a.sin()));
+        }
+        self.grid(&rows, col, mat, false);
+        let top = rows.last().unwrap().clone();
+        let mut cap: Vec<Vec3> = top[..top.len() - 1].to_vec();
+        cap.reverse();
+        self.poly(&cap, col, mat);
+    }
+    pub(crate) fn done(self) -> Mesh {
         (self.v, self.i)
     }
 }
@@ -667,13 +701,13 @@ pub fn meshes() -> [Mesh; 2] {
         // the splash well's top behind it, a step down to the motor
         m.poly(&[v3(-w, sheer_y(1.0), zt), v3(w, sheer_y(1.0), zt), v3(w, sheer_y(1.0), STERN), v3(-w, sheer_y(1.0), STERN)], DECK, TRIM);
         // a sun pad over the stern
-        m.cube(Vec3::new(-0.95, sheer_y(1.0) as f32, zt as f32 - 0.9), Vec3::new(0.95, sheer_y(1.0) as f32 + 0.1, zt as f32), SEAT, TRIM);
+        m.rbox(Vec3::new(-0.95, sheer_y(1.0) as f32 - 0.02, zt as f32 - 0.9), Vec3::new(0.95, sheer_y(1.0) as f32 + 0.12, zt as f32), 0.06, SEAT, TRIM);
         m.cube(Vec3::new(-0.95, floor_y as f32, zt as f32 - 0.9), Vec3::new(0.95, sheer_y(1.0) as f32, zt as f32 - 0.05), DECK, TRIM);
     }
     // Centre console with its wheel, and the windshield wrapped round its front.
     let (c0, c1) = (-0.35f32, 0.35f32);
     let cy0 = floor_y as f32;
-    m.cube(Vec3::new(-0.42, cy0, c0), Vec3::new(0.42, cy0 + 0.92, c1), DECK, TRIM);
+    m.rbox(Vec3::new(-0.42, cy0, c0), Vec3::new(0.42, cy0 + 0.92, c1), 0.12, DECK, TRIM);
     m.poly(&[Vec3::new(-0.42, cy0 + 0.92, c1), Vec3::new(0.42, cy0 + 0.92, c1), Vec3::new(0.42, cy0 + 1.02, c0 + 0.1), Vec3::new(-0.42, cy0 + 1.02, c0 + 0.1)], DARK, TRIM);
     let wheel: Vec<Vec3> = (0..=16).map(|k| {
         let a = k as f32 / 16.0 * std::f32::consts::TAU;
@@ -697,11 +731,11 @@ pub fn meshes() -> [Mesh; 2] {
     m.tube(&frame, 0.016, 5, STEEL, TRIM);
     // Two helm seats behind the console, a bench forward of it.
     for x in [-0.45f32, 0.45] {
-        m.cube(Vec3::new(x - 0.26, cy0, 0.85), Vec3::new(x + 0.26, cy0 + 0.5, 1.35), DECK, TRIM);
-        m.cube(Vec3::new(x - 0.27, cy0 + 0.5, 0.8), Vec3::new(x + 0.27, cy0 + 0.64, 1.38), SEAT, TRIM);
-        m.cube(Vec3::new(x - 0.27, cy0 + 0.64, 1.3), Vec3::new(x + 0.27, cy0 + 1.15, 1.44), SEAT, TRIM);
+        m.rbox(Vec3::new(x - 0.2, cy0, 0.95), Vec3::new(x + 0.2, cy0 + 0.5, 1.25), 0.06, DECK, TRIM);
+        m.rbox(Vec3::new(x - 0.27, cy0 + 0.46, 0.8), Vec3::new(x + 0.27, cy0 + 0.64, 1.38), 0.07, SEAT, TRIM);
+        m.rbox(Vec3::new(x - 0.27, cy0 + 0.6, 1.28), Vec3::new(x + 0.27, cy0 + 1.15, 1.44), 0.07, SEAT, TRIM);
     }
-    m.cube(Vec3::new(-0.6, cy0, -0.85), Vec3::new(0.6, cy0 + 0.45, -0.45), SEAT, TRIM);
+    m.rbox(Vec3::new(-0.6, cy0, -0.85), Vec3::new(0.6, cy0 + 0.45, -0.45), 0.08, SEAT, TRIM);
     // Bow rail and the navigation lights.
     for s in [-1.0f32, 1.0] {
         let pts: Vec<Vec3> = (0..=8)

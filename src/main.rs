@@ -4,6 +4,7 @@ mod airmodels;
 mod airports;
 mod audio;
 mod boat;
+mod ships;
 mod buildings;
 mod aircraft;
 mod cockpit;
@@ -286,6 +287,12 @@ struct Args {
     boat: bool,
     /// --boat-steer SEC,STEER: hold the boat's wheel there from then on (scripted screenshots)
     boat_steer: Option<(f64, f64)>,
+    /// --waves M, --swell M,FROM_DEG, --storm 0..1: the sea (weather panel's SEA section)
+    waves: Option<f64>,
+    swell: Option<(f64, f64)>,
+    storm: Option<f32>,
+    /// --ship carrier|megacarrier|titanic|megaship: start on (or by) that ship
+    ship: Option<ships::Kind>,
     /// start with the HUD hidden (H), for screenshots
     no_hud: bool,
     /// open the large map (M) after this many seconds, for scripted screenshots
@@ -354,6 +361,10 @@ fn parse_args() -> Args {
         aircraft: None,
         boat: false,
         boat_steer: None,
+        ship: None,
+        waves: None,
+        swell: None,
+        storm: None,
         no_hud: false,
     };
     let v: Vec<String> = std::env::args().skip(1).collect();
@@ -417,6 +428,13 @@ fn parse_args() -> Args {
                     }
                 }
             }
+            "--ship" => {
+                a.ship = v.get(i + 1).and_then(|k| ships::Kind::parse(k));
+                if a.ship.is_none() {
+                    eprintln!("unknown ship {} (try carrier, megacarrier, titanic, megaship)", v.get(i + 1).map(|s| s.as_str()).unwrap_or(""));
+                }
+                a.menu.get_or_insert(false);
+            }
             "--boat-steer" => {
                 let p: Vec<f64> = v.get(i + 1).map(|s| s.split(',').filter_map(|x| x.parse().ok()).collect()).unwrap_or_default();
                 if p.len() == 2 {
@@ -448,6 +466,14 @@ fn parse_args() -> Args {
                 }
             }
             "--haze" => a.haze = num(&v, i).map(|h| h as f32),
+            "--waves" => a.waves = num(&v, i),
+            "--swell" => {
+                let p: Vec<f64> = v.get(i + 1).map(|s| s.split(',').filter_map(|x| x.parse().ok()).collect()).unwrap_or_default();
+                if !p.is_empty() {
+                    a.swell = Some((p[0], p.get(1).copied().unwrap_or(250.0)));
+                }
+            }
+            "--storm" => a.storm = num(&v, i).map(|x| x as f32),
             "--snow" => a.snow = num(&v, i).map(|x| x as f32),
             "--cloud-base" => a.cloud_base = num(&v, i).map(|x| x as f32),
             "--day" => a.day = num(&v, i),
@@ -575,7 +601,7 @@ fn parse_args() -> Args {
                 used = 1;
             }
             "--help" | "-h" => {
-                println!("Samiam's Flight Sim\nfablegame [--menu | --no-menu] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--snow 0..1] [--cloud-base M] [--weather] [--pause-menu flight|places|weather|game|route|settings|graphics|controls[@SECONDS]] [--map-open SECONDS [--map-pick KSFO,KOAK]] [--airport CODE [--runway 28L] [--approach]] [--route KSFO,KOAK,...] [--sim-speed 1|2|4|8] [--max-zoom 8..19] [--cockpit] [--fov DEG] [--no-vsync] [--no-taa] [--render-scale 0.5..1] [--graphics low|medium|high|ultra[,scale=0.5..1,clouds=0..2,shadows=0..3,ao=0|1,bloom=0|1,terrain=0..3,water=low|high,msaa=0|1,dyn=0|1,target=FPS,upscaler=taau|fsr]] [--gpu-profile] [--fullscreen] [--mute] [--lang en|fr] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--boost-at SECONDS] [--damage rwing=4.3,laileron=0,rudder=0.5,prop=0.5,engine=0.4,oil=0.6,crack=1,nosegear=0,lsnap=3.4,rfold=3.2,tail=2.0]");
+                println!("Samiam's Flight Sim\nfablegame [--menu | --no-menu] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--waves M] [--swell M,FROM_DEG] [--storm 0..1] [--snow 0..1] [--cloud-base M] [--weather] [--pause-menu flight|places|weather|game|route|settings|graphics|controls[@SECONDS]] [--map-open SECONDS [--map-pick KSFO,KOAK]] [--airport CODE [--runway 28L] [--approach]] [--ship carrier|megacarrier|titanic|megaship [--approach]] [--route KSFO,KOAK,...] [--sim-speed 1|2|4|8] [--max-zoom 8..19] [--cockpit] [--fov DEG] [--no-vsync] [--no-taa] [--render-scale 0.5..1] [--graphics low|medium|high|ultra[,scale=0.5..1,clouds=0..2,shadows=0..3,ao=0|1,bloom=0|1,terrain=0..3,water=low|high,msaa=0|1,dyn=0|1,target=FPS,upscaler=taau|fsr]] [--gpu-profile] [--fullscreen] [--mute] [--lang en|fr] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--boost-at SECONDS] [--damage rwing=4.3,laileron=0,rudder=0.5,prop=0.5,engine=0.4,oil=0.6,crack=1,nosegear=0,lsnap=3.4,rfold=3.2,tail=2.0]");
                 std::process::exit(0);
             }
             other => {
@@ -642,6 +668,18 @@ struct Game {
     /// lat, lon (rad), heading, since (real seconds)
     boat_seek: Option<(f64, f64, f64, f64)>,
     boat_steer: Option<(f64, f64)>,
+    /// the big ships at sea (ships.rs), the carrier's catapult and wires
+    fleet: ships::Fleet,
+    ops: ships::Ops,
+    /// a start on a ship, waiting for the sea there to load: what ship,
+    /// lat, lon (rad), since (real s), on final approach to it
+    ship_seek: Option<(ships::Kind, f64, f64, f64, bool)>,
+    /// held on the ship's deck where it was put (until the real time given),
+    /// at this spot in its frame: (ship, origin, attitude, until)
+    ship_hold: Option<(u64, DVec3, DQuat, f64)>,
+    /// the ship chosen in the start screen (and the last ship started on, for R)
+    ship_pick: Option<ships::Kind>,
+    ship_approach: bool,
     crashed: bool,
     crash: Option<Crash>,
     crash_real: f64,
@@ -928,6 +966,8 @@ impl Game {
         solids.extend(airmodels::build());
         debug_assert_eq!(solids.len() as u32, boat::MESH);
         solids.extend(boat::meshes());
+        debug_assert_eq!(solids.len() as u32, ships::MESH);
+        solids.extend(ships::meshes());
         r.set_inst_meshes(&solids);
         let mut menu = menu::Menu::new(lat, lon, args.hour);
         menu.aircraft = aircraft::ALL.iter().position(|s| std::ptr::eq(*s, spec)).unwrap_or(0);
@@ -959,7 +999,16 @@ impl Game {
         }
         wx.open = args.weather_panel;
         // Real weather, unless the command line sets the weather itself.
-        let scripted = std::env::args().any(|a| matches!(a.as_str(), "--clouds" | "--storms" | "--alto" | "--wind" | "--haze" | "--snow" | "--cloud-base"));
+        if let Some(s) = args.storm {
+            wx.set_storm(s);
+        }
+        if let Some(h) = args.waves {
+            (wx.sea.auto, wx.sea.hs) = (false, h.clamp(0.0, 12.0));
+        }
+        if let Some((h, from)) = args.swell {
+            (wx.sea.swell_auto, wx.sea.swell, wx.sea.swell_from) = (false, h.clamp(0.0, 8.0), from);
+        }
+        let scripted = std::env::args().any(|a| matches!(a.as_str(), "--clouds" | "--storms" | "--alto" | "--wind" | "--haze" | "--snow" | "--cloud-base" | "--storm"));
         wx.live = prefs.live_weather && !scripted;
         let set_time = std::env::args().any(|a| matches!(a.as_str(), "--time" | "--day" | "--time-rate"));
         wx.real_time = prefs.real_time && !set_time;
@@ -990,6 +1039,7 @@ impl Game {
             mode: if args.menu.unwrap_or(true) { Mode::Menu } else { Mode::Fly }, menu, menu_go: args.menu_go, heading: args.heading.to_radians(), destr: destruct::Destruction::new(secs.to_bits()),
             sheds: damage::Sheds::default(), fx_anchor: plane.pos, fx_shift: DVec3::ZERO, smoke_acc: 0.0, flash: Vec::new(), damage_spec: args.damage.clone(), wreck_dirty: false, wreck_t: 0.0, wreck_seen: 0.0,
             boat_mode: args.boat, boat: None, boat_seek: None, boat_steer: args.boat_steer,
+            fleet: ships::Fleet::default(), ops: ships::Ops::default(), ship_seek: None, ship_hold: None, ship_pick: args.ship, ship_approach: args.approach && args.ship.is_some(),
             start_rx: None, name_rx: None, last_click: -10.0, n_cars: 0, city_glow: 0.0, gauges: gauges::Gauges::new(&plane, secs.to_bits()), plane,
             airport_rx: None, hold_spot: None,
             gfx, gfx0: gfx, gfx_base, prefs_load: prefs.clone(), prefs_start: None, gfx_applied: None, gfx_keep: prefs.graphics, dyn_ms: 0.0, dyn_t: Instant::now(), dyn_up: false, dyn_ban: (0.0, Instant::now()), frame_t0: Instant::now(), frame_ms: 16.0, casc_keep: [([[0.0; 4]; 4], DVec3::ZERO); 3], casc_ok: false,
@@ -1012,6 +1062,10 @@ impl Game {
             g.menu.aircraft = aircraft::ALL.len();
             g.boat_seek = Some((lat.to_radians(), lon.to_radians(), args.heading.to_radians(), 0.0));
             g.cam_dist = boat::CAM_DIST;
+        }
+        if let Some(k) = args.ship.filter(|_| args.menu != Some(true)) {
+            g.boat_seek = None;
+            g.start_ship(k, lat.to_radians(), lon.to_radians(), g.ship_approach);
         }
         // With --menu, an --airport is chosen on the globe rather than flown from.
         if args.menu == Some(true) {
@@ -1166,22 +1220,22 @@ impl Game {
         self.anchor_fx(pos);
         let upf = up.as_vec3();
         for (at, v, k) in spray {
+            // Bow spray: sheets of drops thrown out low off the chines that
+            // arc and fall back into the sea (no mist: it read as smoke).
             let r = &mut self.rng;
-            femit.push((at, render::Particle { vel: (v.as_vec3() + r.dir() * 0.8).into(), life: r.range(0.5, 1.3), size0: r.range(0.08, 0.2) * (0.6 + k), size1: r.range(0.5, 1.3) * (0.6 + k), kind: crash::DROPS, drag: r.range(0.25, 0.6), seed: r.f(), alpha: r.range(0.35, 0.6), ..Default::default() }));
-            if r.f() < 0.6 * k {
-                femit.push((at, render::Particle { vel: (v.as_vec3() * 0.6 + r.dir() * 0.5).into(), life: r.range(0.8, 1.8), size0: r.range(0.4, 0.8), size1: r.range(1.6, 3.2), kind: crash::MIST, drag: 1.6, buoy: 0.0, seed: r.f(), alpha: r.range(0.08, 0.16), ..Default::default() }));
-            }
+            femit.push((at, render::Particle { vel: (v.as_vec3() + r.dir() * 0.5).into(), life: r.range(0.45, 1.0), size0: r.range(0.05, 0.1), size1: r.range(0.25, 0.6) * (0.7 + 0.6 * k), kind: crash::DROPS, drag: r.range(0.15, 0.35), seed: r.f(), alpha: r.range(0.55, 0.85), ..Default::default() }));
         }
-        // The rooster tail off the propeller.
+        // The rooster tail off the propeller: a low plume of droplet clumps
+        // just behind the motor, thrown up a metre or so and falling back.
         if stern_spray {
             let r = &mut self.rng;
-            let n = ((spd - 6.0) / 6.0).clamp(0.0, 3.0) * 30.0 * dt as f32;
+            let n = ((spd - 6.0) / 8.0).clamp(0.0, 2.0) * 22.0 * dt as f32;
             let mut k = n;
             while k > 0.0 && r.f() < k {
                 k -= 1.0;
                 let back = (rot * DVec3::Z).as_vec3();
-                let v = vel.as_vec3() * 0.35 + back * r.range(2.0, 5.0) + upf * r.range(1.5, 3.5) + r.dir() * 0.7;
-                femit.push((stern, render::Particle { vel: v.into(), life: r.range(0.6, 1.4), size0: r.range(0.08, 0.18), size1: r.range(0.5, 1.2), kind: crash::DROPS, drag: 0.5, seed: r.f(), alpha: r.range(0.3, 0.5), ..Default::default() }));
+                let v = vel.as_vec3() * 0.8 + back * r.range(0.5, 2.0) + upf * r.range(2.0, 4.0) + r.dir() * 0.6;
+                femit.push((stern, render::Particle { vel: v.into(), life: r.range(0.5, 0.9), size0: r.range(0.05, 0.1), size1: r.range(0.2, 0.45), kind: crash::DROPS, drag: 0.2, seed: r.f(), alpha: r.range(0.5, 0.75), ..Default::default() }));
             }
         }
         for (at, vs) in splashes {
@@ -1201,6 +1255,224 @@ impl Game {
             if let Some(a) = &self.audio {
                 a.event(audio::Event::Splash((vs as f32 / 5.0).clamp(0.2, 1.5)));
             }
+        }
+    }
+
+    /// Start on (or by) a ship of `kind` near lat, lon (rad): it goes on
+    /// the nearest open sea big enough for it, sailing into the wind, once
+    /// the ground there has loaded. Meanwhile the aircraft waits above.
+    fn start_ship(&mut self, kind: ships::Kind, lat: f64, lon: f64, approach: bool) {
+        self.ship_pick = Some(kind);
+        self.ship_approach = approach;
+        self.ship_seek = Some((kind, lat, lon, self.real, approach));
+        self.ship_hold = None;
+        self.ops.reset();
+        if !self.boat_mode {
+            self.respawn_at(lat, lon, 600.0, self.heading, 0.0);
+            self.plane.hold = true;
+        }
+        self.status = t!("Finding open sea for the {}…", "Recherche d'une mer libre pour : {}…", tr(kind.name()));
+        self.status_until = self.real + 30.0;
+    }
+
+    fn ship_seek_water(&mut self) {
+        let Some((kind, lat, lon, since, approach)) = self.ship_seek else { return };
+        let waited = self.real - since;
+        if self.world.ground_zoom(lat, lon).is_none_or(|z| z < 11) && waited < 25.0 {
+            return;
+        }
+        // A 747 goes on the mega carrier.
+        let kind = if kind == ships::Kind::Carrier && !self.boat_mode && ships::too_big_for_carrier(self.spec) { ships::Kind::MegaCarrier } else { kind };
+        let hdg = self.wx.wind_from.to_radians();
+        let w = &self.world;
+        let mut wet = |la: f64, lo: f64| w.ground(la, lo).map(|g| g.water);
+        let at = |de: f64, dn: f64| (lat + dn / geo::R, lon + de / (geo::R * lat.cos().max(0.05)));
+        let step = (kind.dims().len * 0.5).max(400.0);
+        let mut found = None;
+        'rings: for ring in 0..=80 {
+            let r = ring as f64 * step;
+            if r > 40_000.0 {
+                break;
+            }
+            let n = ((std::f64::consts::TAU * r / step).ceil() as usize).max(1);
+            for k in 0..n {
+                let a = k as f64 / n as f64 * std::f64::consts::TAU;
+                let (la, lo) = at(r * a.cos(), r * a.sin());
+                if ships::Fleet::fits_at(kind, la, lo, hdg, &mut wet) == Some(true) {
+                    found = Some((la, lo));
+                    break 'rings;
+                }
+            }
+        }
+        let (la, lo) = match found {
+            Some(p) => p,
+            None if waited < 25.0 => return,
+            None => {
+                self.status = t!("No open sea big enough here: the ship is where you chose", "Pas de mer assez grande ici : le navire est au point choisi").into();
+                self.status_until = self.real + 6.0;
+                (lat, lon)
+            }
+        };
+        self.ship_seek = None;
+        let id = self.fleet.start_at(kind, la, lo, hdg, &mut wet);
+        self.place_at_ship(id, approach);
+    }
+
+    /// Put the aircraft (or the boat) on, by or on final approach to ship `id`.
+    fn place_at_ship(&mut self, id: u64, approach: bool) {
+        let Some(s) = self.fleet.by_id(id) else { return };
+        let (kind, pos, rot, vel, fwd, name) = (s.kind, s.pos, s.rot, s.vel, s.fwd(), s.name.clone());
+        let d = kind.dims();
+        let (e, n, _) = geo::enu(pos);
+        let hdg_of = |f: DVec3| f.dot(e).atan2(f.dot(n));
+        self.mode = Mode::Fly;
+        self.menu.starting = false;
+        self.ops.reset();
+        if self.boat_mode {
+            // In the water off its port side.
+            let p = pos + rot * DVec3::new(-(0.5 * d.beam + 90.0 + 0.04 * d.len), 0.0, 0.1 * d.len);
+            let (la, lo, _) = geo::pos_to_lla(p);
+            self.boat = None;
+            self.boat_seek = Some((la, lo, hdg_of(fwd), self.real - 30.0));
+            self.status = t!("{} · {} kt", "{} · {} nœuds", name, (self.fleet.by_id(id).map(|s| s.speed).unwrap_or(0.0) * 1.94384).round());
+            self.status_until = self.real + 8.0;
+            return;
+        }
+        let spot = if approach || self.spec.speed_k > 1.5 { None } else { ships::start_spot(kind, self.spec) };
+        match spot {
+            Some((l, q)) => {
+                let wp = pos + rot * l;
+                let (la, lo, h) = geo::pos_to_lla(wp);
+                let hd = hdg_of(fwd);
+                self.respawn_at(la, lo, h + 10.0, hd, 0.0);
+                self.plane = Plane::spawn_ground(self.spec, la, lo, 0.0, hd, 0.0);
+                self.plane.pos = wp;
+                self.plane.rot = rot * q;
+                self.plane.vel = vel;
+                if let Some(spec) = &self.damage_spec {
+                    self.plane.dmg.apply_spec(spec);
+                }
+                self.gauges = gauges::Gauges::new(&self.plane, self.frame ^ 0x51ed);
+                self.cam_pos = self.plane.pos - self.plane.forward() * self.spec.cam_dist;
+                self.cam_dir = -self.plane.forward();
+                self.prev_cam = self.cam_pos;
+                (self.prev_gear, self.prev_flaps, self.was_ground) = (1.0, 0.0, true);
+                self.ship_hold = Some((id, l, q, self.real + 2.0));
+                self.parking_brake = true;
+                self.status = if kind == ships::Kind::Carrier {
+                    t!("{} · on the catapult: full power and hold Space to launch · O tail hook", "{} · sur la catapulte : plein gaz et maintenez Espace pour le lancement · O crosse d'appontage", name)
+                } else {
+                    t!("{} · full power to take off down the deck (the brakes let go)", "{} · plein gaz pour décoller sur le pont (les freins se relâchent)", name)
+                };
+                self.status_until = self.real + 14.0;
+            }
+            None => {
+                // On final approach to it, or in the air astern of a ship with no deck to land on.
+                let g = kind.geom();
+                let (aim, axis) = match (&g.landing, kind) {
+                    (Some(ln), _) => (Some(ln.ramp + ln.dir * 55.0), ln.dir),
+                    (None, ships::Kind::MegaCarrier) => (Some(DVec2::new(-50.0, 1450.0)), DVec2::new(0.0, -1.0)),
+                    _ => (None, DVec2::new(0.0, -1.0)),
+                };
+                let axis_w = rot * DVec3::new(axis.x, 0.0, axis.y);
+                let (v, notch) = self.spec.approach;
+                // The deck sails on (and the wind blows) while it comes in: it
+                // heads so that, seen from the deck, it comes straight down
+                // the landing line (k: how fast it closes along it).
+                let up = pos.normalize();
+                let flat = |x: DVec3| x - up * x.dot(up);
+                let sv = flat(vel - self.wx.steady(pos, 300.0));
+                let a_s = axis_w.dot(sv);
+                let k = -a_s + (a_s * a_s - sv.length_squared() + v * v).max(0.0).sqrt();
+                let air = axis_w * k + sv;
+                let (p0, alt) = match aim {
+                    Some(a) => {
+                        let td = pos + rot * DVec3::new(a.x, d.deck, a.y);
+                        let dist = (k * 20.0).clamp(800.0, 4000.0) * self.spec.speed_k;
+                        (td - axis_w * dist, d.deck + dist * 3.5f64.to_radians().tan())
+                    }
+                    None => (pos - axis_w * (400.0 + 0.8 * d.len) + rot * DVec3::new(-0.8 * d.beam - 120.0, 0.0, 0.0), d.deck + 90.0 + 0.1 * d.len + 2.0 * self.spec.b),
+                };
+                let (la, lo, _) = geo::pos_to_lla(p0);
+                let hd = if aim.is_some() { hdg_of(air) } else { hdg_of(axis_w) };
+                self.respawn_at(la, lo, alt, hd, if aim.is_some() { v } else { self.spec.cruise });
+                log::debug!("ship approach: heading {:.1}°, ship {:.1}°, axis {:.1}°, k {k:.1}, v {v:.1}, sv {:.1?}", hd.to_degrees(), hdg_of(fwd).to_degrees(), hdg_of(axis_w).to_degrees(), sv);
+                if aim.is_some() {
+                    self.plane.configure(notch, true, k * 3.5f64.to_radians().tan());
+                    self.ops.hook = g.landing.is_some();
+                    self.status = if g.landing.is_some() { t!("{} · final approach: catch a wire with the hook down (O)", "{} · approche finale : crosse sortie (O), accrochez un brin", name) } else { t!("{} · final approach to the deck", "{} · approche finale vers le pont", name) };
+                } else {
+                    self.status = name;
+                }
+                self.status_until = self.real + 12.0;
+            }
+        }
+    }
+
+    /// Once a frame: a ship start waits for its sea, the ships sail on,
+    /// what was put on a deck rides it until it is let go.
+    fn ships_frame(&mut self, dt: f64) {
+        if self.ship_seek.is_some() {
+            self.ship_seek_water();
+        }
+        let at = self.boat.as_ref().filter(|_| self.boat_mode).map(|b| b.pos).unwrap_or(self.plane.pos);
+        let w = &self.world;
+        let mut sea = |p: DVec3| {
+            let (la, lo, _) = geo::pos_to_lla(p);
+            w.ground(la, lo).map(|g| (g.h, g.water))
+        };
+        self.fleet.update(dt, at, &mut sea);
+        if let Some((_, _, _, until)) = self.ship_hold {
+            self.ship_carry();
+            if self.real > until {
+                self.plane.hold = false;
+                self.plane.t = 2.0;
+                self.ship_hold = None;
+            }
+        }
+        // The brakes let go as the power comes up (not on the catapult: it does that).
+        if self.parking_brake && self.ship_pick.is_some() && !self.ops.on_cat && self.plane.throttle > 0.55 && !self.boat_mode {
+            self.parking_brake = false;
+            self.status = t!("Brakes off", "Freins relâchés").into();
+            self.status_until = self.real + 2.0;
+        }
+        if self.frame % 30 == 0 {
+            if let Some(f) = self.fleet.flagship() {
+                let l = f.rot.inverse() * (self.plane.pos - f.pos);
+                log::debug!("ship: plane hdg {:.1}°, local {l:.1?}, rel v {:.1}, ground {}, hold {}, on_cat {}, launching {}, trapped {}, brake {}, thr {:.2}", { let (e, n, _) = geo::enu(self.plane.pos); self.plane.forward().dot(e).atan2(self.plane.forward().dot(n)).to_degrees() }, (self.plane.vel - f.vel).length(), self.plane.on_ground, self.plane.hold, self.ops.on_cat, self.ops.launching(), self.ops.trapped(), self.parking_brake, self.plane.throttle);
+            }
+        }
+        if let Some(n) = self.ops.note.take() {
+            self.status = match n {
+                "cat" => t!("Catapult: launch!", "Catapulte : lancement !"),
+                "launch" => {
+                    // (hands off, the flight controls rotate it to its flying attitude)
+                    self.plane.omega.x += 0.12;
+                    self.plane.trim_to_climb();
+                    t!("Off the catapult · L gear up", "Catapulté · L rentre le train")
+                }
+                _ => t!("Trapped: the wire has you · O raises the hook", "Appontage : brin accroché · O relève la crosse"),
+            }
+            .into();
+            self.status_until = self.real + 4.0;
+        }
+        if self.ops.launching() {
+            self.parking_brake = false;
+        }
+    }
+
+    /// The aircraft held on its ship's deck, where it was put.
+    fn ship_carry(&mut self) {
+        let Some((id, l, q, _)) = self.ship_hold else { return };
+        match self.fleet.by_id(id) {
+            Some(s) => {
+                self.plane.pos = s.pos + s.rot * l;
+                self.plane.rot = s.rot * q;
+                self.plane.vel = s.vel;
+                self.plane.omega = DVec3::ZERO;
+                self.plane.hold = true;
+            }
+            None => self.ship_hold = None,
         }
     }
 
@@ -1357,6 +1629,9 @@ impl Game {
     /// (see `airport_rx`), then the aircraft appears lined up on the runway
     /// in use, or on a final approach to it.
     fn start_airport(&mut self, idx: u32, runway: Option<String>, approach: bool, keep_local: bool) {
+        // (a start elsewhere: R no longer goes back to the ship)
+        self.ship_pick = None;
+        self.fleet.release_flagship();
         let a = &airports::Db::get().apts[idx as usize];
         self.status = t!("Preparing {} {}…", "Préparation de {} {}…", a.code(), a.name);
         self.status_until = self.real + 60.0;
@@ -1754,6 +2029,11 @@ impl Game {
             KeyCode::KeyF if !self.crashed => self.plane.set_flaps(1),
             KeyCode::KeyV if !self.crashed => self.plane.set_flaps(-1),
             KeyCode::KeyL if !self.crashed => self.plane.toggle_gear(),
+            KeyCode::KeyO if !self.crashed && !self.boat_mode => {
+                self.ops.hook = !self.ops.hook;
+                self.status = if self.ops.hook { t!("Tail hook down", "Crosse sortie") } else { t!("Tail hook up", "Crosse rentrée") }.into();
+                self.status_until = self.real + 2.0;
+            }
             KeyCode::Slash if !self.crashed => self.plane.toggle_speedbrake(),
             KeyCode::KeyG => {
                 self.goto_open = true;
@@ -1834,6 +2114,14 @@ impl Game {
 
     /// A fresh aircraft in the air over where we are (or where we crashed), on the same heading.
     fn respawn_here(&mut self) {
+        // Started on a ship and still near it: back on its deck (or approach).
+        if let (Some(_), Some(s)) = (self.ship_pick, self.fleet.flagship()) {
+            if (s.pos - self.plane.pos).length() < 40_000.0 {
+                let id = s.id;
+                self.place_at_ship(id, self.ship_approach);
+                return;
+            }
+        }
         let (lat, lon, h) = geo::pos_to_lla(if self.crashed { self.crash.as_ref().map(|c| c.site).unwrap_or(self.plane.pos) } else { self.plane.pos });
         let g = self.world.ground(lat, lon).map(|g| g.h).unwrap_or(h);
         let hd = self.plane.forward().dot(geo::enu(self.plane.pos).0).atan2(self.plane.forward().dot(geo::enu(self.plane.pos).1));
@@ -1843,6 +2131,9 @@ impl Game {
     /// Fly from a known spot: its ground height is looked up in the background,
     /// then the aircraft appears above it (see `goto_rx`).
     fn fly_to(&mut self, lat: f64, lon: f64, name: &str) {
+        // (a start elsewhere: R no longer goes back to the ship)
+        self.ship_pick = None;
+        self.fleet.release_flagship();
         self.status = t!("Flying to {}…", "En route vers {}…", i18n::tr_owned(name));
         self.status_until = self.real + 30.0;
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1941,6 +2232,12 @@ impl Game {
             return;
         }
         self.set_vehicle(self.menu.aircraft);
+        if let Some(k) = self.ship_pick {
+            self.utc = (self.menu.hour - lon / 15.0).rem_euclid(24.0);
+            self.start_ship(k, lat.to_radians(), lon.to_radians(), self.ship_approach);
+            return;
+        }
+        self.fleet.release_flagship();
         if let Some(i) = self.menu.airport.filter(|_| self.menu.start != menu::Start::Overhead && !self.boat_mode) {
             self.start_airport(i, self.menu.runway.clone(), self.menu.start == menu::Start::Approach, false);
             return;
@@ -2669,6 +2966,9 @@ impl Game {
         let mut emit = Vec::new();
         let mut femit: Vec<(DVec3, render::Particle)> = Vec::new();
         let (mut scrape_n, mut steps) = (0usize, 0usize);
+        if !in_menu {
+            self.ships_frame(dt);
+        }
         if self.boat_mode && !in_menu {
             self.boat_seek_water();
         }
@@ -2677,6 +2977,8 @@ impl Game {
             let h = 1.0 / 180.0;
             while self.acc >= h {
                 self.acc -= h;
+                // The ships move on; the decks near the aircraft (or boat) are what it can touch.
+                self.fleet.advance(h);
                 if self.boat_mode {
                     // The speedboat instead of the aircraft (boat.rs).
                     if let Some(b) = self.boat.as_mut() {
@@ -2690,10 +2992,19 @@ impl Game {
                             bi.steer = st;
                         }
                         b.step(h, &bi, &mut sea);
+                        // (into a ship's side: pushed back off it)
+                        self.world.decks = self.fleet.decks_near(b.pos, 1000.0);
+                        if let Some((p, v)) = self.world.decks.push_out(b.pos, b.vel) {
+                            b.pos = p;
+                            b.vel = v;
+                        }
                     }
                     steps += 1;
                     continue;
                 }
+                self.world.decks = self.fleet.decks_near(self.plane.pos, 3000.0);
+                self.ship_carry();
+                self.plane.push = if self.plane.hold { DVec3::ZERO } else { self.ops.step(h, &self.plane, &self.world.decks, c.boost) };
                 let imp = self.plane.step(h, &c, &self.world);
                 self.gauges.update(h, &self.plane, self.time);
                 steps += 1;
@@ -3173,6 +3484,7 @@ impl Game {
         }
         // The sea follows the weather's wind (and the clock).
         let sinlat = cam.normalize().z;
+        self.world.ocean.set = self.wx.sea.set();
         self.world.ocean.update(dt, self.time, self.wx.wind, self.wx.wind_from, sinlat, cam, east, north, self.ocean_off);
         let sun = self.sun_dir();
         let (moon, moon_lit) = self.moon_dir();
@@ -3292,9 +3604,13 @@ impl Game {
             start: [if in_menu { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
             snow: v4(self.snow_axis, self.snow_s),
             wake: [[0.0; 4]; render::WAKE_ROWS],
+            ships: [[0.0; 4]; render::SHIP_ROWS],
         };
         if let Some(b) = self.boat.as_ref().filter(|_| self.boat_mode && !in_menu) {
             b.wake_rows(cam, &mut g.wake);
+        }
+        if !in_menu && gpuprof::opt_on("ships") {
+            g.wake[0][1] = self.fleet.wake_rows(cam, &mut g.ships) as f32;
         }
         if !in_menu {
             let cells = self.wx.storm_cells(cam);
@@ -3452,6 +3768,11 @@ impl Game {
         let mut fall = Vec::new();
         let mut air_lights = Vec::new();
         if !in_menu {
+            // (FABLE_OPT_OFF=ships leaves them out, to measure what they cost)
+            if gpuprof::opt_on("ships") {
+                self.fleet.instances(cam, &mut insts);
+                self.fleet.lights(cam, &mut air_lights);
+            }
             let local = (self.utc + clon.to_degrees() / 15.0).rem_euclid(24.0);
             let sun_up = geo::enu(cam).2.dot(self.sun_dir());
             self.world.car_instances(cam, cars::activity(local as f32), sun_up, &mut insts, &mut air_lights);
@@ -3562,6 +3883,7 @@ impl Game {
         let mut start = false;
         let mut jump: Option<(f64, f64, &'static str)> = None;
         let mut airport: Option<u32> = None;
+        let mut ship_click: Option<ships::Kind> = None;
         let alt = self.menu.alt;
         self.src.google.update_attribution(self.menu.lat, self.menu.lon, alt);
         let out = self.egui_ctx.clone().run_ui(raw, |root| {
@@ -3786,6 +4108,27 @@ impl Game {
                             });
                             ui.label(RichText::new(if padui::active() { t!("Or put an airport square on the globe in the crosshair and press X.", "Ou placez un carré d'aéroport du globe dans le viseur et appuyez sur X.") } else { t!("Or click an airport square on the globe; double-click to go right away.", "Ou cliquez sur un carré d'aéroport du globe ; double-clic pour y aller directement.") }).size(11.5).color(DIM));
                         });
+                        let sh = self.ship_pick.map(|k| tr(k.name())).unwrap_or("");
+                        menu::section(ui, "ships", t!("Ships", "Navires"), sh, self.ship_pick.is_some(), |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(5.0, 5.0);
+                                for k in ships::Kind::ALL {
+                                    if ui.add(egui::Button::new(RichText::new(tr(k.name())).size(12.5)).selected(self.ship_pick == Some(k))).on_hover_text(tr(k.blurb())).clicked() {
+                                        ship_click = Some(k);
+                                    }
+                                }
+                            });
+                            if let Some(k) = self.ship_pick {
+                                if k.is_carrier() && !is_boat {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                                        ui.selectable_value(&mut self.ship_approach, false, t!("On deck", "Sur le pont"));
+                                        ui.selectable_value(&mut self.ship_approach, true, t!("Final approach", "Approche finale"));
+                                    });
+                                }
+                            }
+                            ui.label(RichText::new(t!("The ship sails into the wind on the open sea nearest the spot you pick, with the others in company. A 747 goes on the mega carrier.", "Le navire fait route face au vent sur la mer libre la plus proche du point choisi, les autres en escorte. Un 747 part du méga porte-avions.")).size(11.5).color(DIM));
+                        });
                         ui.add_space(6.0);
                         menu::heading(ui, t!("START POINT", "POINT DE DÉPART"));
                         egui::Frame::new().fill(Color32::from_white_alpha(8)).corner_radius(8.0).inner_margin(10.0).show(ui, |ui| {
@@ -3796,6 +4139,10 @@ impl Game {
                                     ui.label(RichText::new(name).size(14.0).color(Color32::WHITE));
                                     ui.label(RichText::new(t!("{}   ·   {} local", "{}   ·   {} heure locale", menu::latlon(lat, lon), menu::hhmm(self.menu.hour))).size(12.0).color(DIM));
                                     ui.add_space(4.0);
+                                    if let Some(k) = self.ship_pick {
+                                        let what = if is_boat { t!("Afloat beside the {}", "À flot près du {}", tr(k.name())) } else if self.ship_approach && k.is_carrier() { t!("On final approach to the {}", "En approche finale vers le {}", tr(k.name())) } else if k.is_carrier() { t!("On the deck of the {}", "Sur le pont du {}", tr(k.name())) } else { t!("In the air by the {}", "En vol près du {}", tr(k.name())) };
+                                        ui.label(RichText::new(what).size(13.0).color(TEXT));
+                                    } else {
                                     match self.menu.airport {
                                         Some(i) => {
                                             let a = &db.apts[i as usize];
@@ -3833,6 +4180,7 @@ impl Game {
                                                 });
                                             }
                                         }
+                                    }
                                     }
                                 }
                                 None => {
@@ -3982,6 +4330,21 @@ impl Game {
         }
         if let Some(i) = airport {
             self.choose_airport(i);
+            self.ship_pick = None;
+        }
+        if jump.is_some() {
+            self.ship_pick = None;
+        }
+        if let Some(k) = ship_click {
+            self.ship_pick = if self.ship_pick == Some(k) { None } else { Some(k) };
+            if self.ship_pick.is_some() {
+                self.menu.airport = None;
+                if self.menu.pick.is_none() {
+                    // (out to sea off the Golden Gate)
+                    self.menu.look_at(37.70, -122.75, 60_000.0);
+                    self.pick(37.70, -122.75);
+                }
+            }
         }
         let want = aircraft::ALL[if self.menu.aircraft >= aircraft::ALL.len() { 0 } else { self.menu.aircraft }];
         if !std::ptr::eq(want, self.spec) {
@@ -4994,7 +5357,7 @@ impl Game {
                 } else {
                     Vec::new()
                 };
-                let scene = minimap::Scene { lat: lat.to_degrees(), lon: lon.to_degrees(), hdg: hdg_d, gs: gs_d, cruise: self.spec.cruise, agl, route: &self.route, traffic };
+                let scene = minimap::Scene { lat: lat.to_degrees(), lon: lon.to_degrees(), hdg: hdg_d, gs: gs_d, cruise: self.spec.cruise, agl, route: &self.route, traffic, ships: self.fleet.map_list() };
                 if mini {
                     let screen = ctx.content_rect();
                     let bottom = if credits_r.is_positive() { credits_r.top() - 6.0 } else { screen.bottom() - 14.0 };

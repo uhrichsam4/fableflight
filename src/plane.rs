@@ -137,6 +137,9 @@ pub struct Plane {
     pub dirt: Vec<(DVec3, DVec3, f32)>,
     /// resting or sliding on the airframe itself rather than the wheels
     pub on_hull: bool,
+    /// a force from outside the airframe this step (planet frame, N): a
+    /// carrier's catapult or arresting wire (ships.rs `Ops`)
+    pub push: DVec3,
     /// contact points (reused each step)
     pts: Vec<(DVec3, Part)>,
     /// moments since the left wing, right wing, tail and nose last broke
@@ -228,6 +231,7 @@ impl Plane {
             hold: false,
             splashes: Vec::new(),
             on_hull: false,
+            push: DVec3::ZERO,
             pts: Vec::new(),
             cool: [0.0; 4],
             fold_tq: [0.0; 2],
@@ -843,6 +847,13 @@ impl Plane {
         }
     }
     /// Angle of attack (rad) that carries the weight at true airspeed `v`.
+    /// Trimmed to climb away at its present speed (off a catapult, hands off: the
+    /// flight controls rotate it to its flying attitude).
+    pub fn trim_to_climb(&mut self) {
+        let v = self.airspeed().length().max(20.0);
+        let a = self.alpha_level(v, RHO0, self.spec.flap_cl * self.flaps);
+        self.trim = (a * 1.35 + 0.02).min(self.spec.alpha_trim);
+    }
     fn alpha_level(&self, v: f64, rho: f64, flap_cl: f64) -> f64 {
         let s = self.spec;
         let q = 0.5 * rho * v * v;
@@ -1269,30 +1280,40 @@ impl Plane {
         // Nothing is solid for the first moments after a spawn: the terrain
         // under the aircraft is still a coarse guess until its tile arrives.
         let reach = 60.0 + 2.0 * spec.b;
-        let close = self.t > 1.5 && (ground.as_ref().map(|g| h - g.h < reach).unwrap_or(false) || world.building(lat, lon).is_some());
+        // (a ship's deck is there at once: it does not wait on any tile)
+        let on_ship = world.decks.near(self.pos, reach);
+        let close = (self.t > 1.5 && (ground.as_ref().map(|g| h - g.h < reach).unwrap_or(false) || world.building(lat, lon).is_some())) || on_ship;
         self.brushes = (self.brushes - dt * 0.5).max(0.0);
         let mut skidding = false;
         if close {
             if let Some(imp) = self.trees(world) {
                 return self.impact(imp, "tree");
             }
-            let hit = |p: DVec3, world: &World| -> Option<(f64, bool, Option<(geo::TileId, usize)>)> {
+            // How deep a point is in what it touches: depth, water, the
+            // building hit, whether that is a wall (a building's or a ship's
+            // side), and how fast the surface itself moves (a ship's deck).
+            let hit = |p: DVec3, world: &World| -> Option<(f64, bool, Option<(geo::TileId, usize)>, bool, DVec3)> {
+                if on_ship {
+                    if let Some(d) = world.decks.probe(p) {
+                        return Some((d.pen, false, None, d.wall, d.vel));
+                    }
+                }
                 let (la, lo, ph) = geo::pos_to_lla(p);
                 let g = world.ground(la, lo)?;
                 if let Some(b) = world.building(la, lo) {
                     if ph < b.top && ph > b.base - if b.bridge { 0.0 } else { 3.0 } {
-                        return Some((b.top - ph, false, Some((b.tile, b.idx))));
+                        return Some((b.top - ph, false, Some((b.tile, b.idx)), true, DVec3::ZERO));
                     }
                 } else if ph < g.h {
                     // Under the 3D tiles the ground is the mesh, buildings and all:
                     // into one of them, it is that building that was hit.
                     if let Some(b) = world.photo_building(la, lo, g.h) {
                         if ph > b.base - 3.0 {
-                            return Some((g.h - ph, false, Some((b.tile, b.idx))));
+                            return Some((g.h - ph, false, Some((b.tile, b.idx)), true, DVec3::ZERO));
                         }
                     }
                 }
-                Some((g.h - ph, g.water, None))
+                Some((g.h - ph, g.water, None, false, DVec3::ZERO))
             };
             // Every point of the airframe that can touch something, and what it
             // takes to break it: gentle enough, things only scrape; harder, the
@@ -1304,7 +1325,7 @@ impl Plane {
             let mut walled = false;
             for &(r, part) in &pts {
                 let p = self.pos + self.rot * r;
-                let Some((mut pen, water, building)) = hit(p, world) else { continue };
+                let Some((mut pen, water, building, wall, sv)) = hit(p, world) else { continue };
                 if water {
                     // A ditched aircraft settles lower in the water as it floods.
                     pen -= self.sink;
@@ -1312,7 +1333,8 @@ impl Plane {
                 if pen <= 0.0 {
                     continue;
                 }
-                let mut pv = self.vel + self.rot * self.omega.cross(r);
+                // (relative to what it touches: a ship's deck moves)
+                let mut pv = self.vel + self.rot * self.omega.cross(r) - sv;
                 if let Part::Fold(s) = part {
                     let f = &self.dmg.fold[s];
                     pv += self.rot * (f.axis.cross(r.as_vec3() - f.pivot) * f.rate).as_dvec3();
@@ -1320,9 +1342,9 @@ impl Plane {
                 let vn = pv.dot(upw);
                 let closing = (-vn).max(0.0);
                 let sp = pv.length();
-                let crash = Impact { pos: p, vel: self.vel, water, ground_h: geo::pos_to_lla(p).2 + if building.is_some() { 0.0 } else { pen }, building };
+                let crash = Impact { pos: p, vel: self.vel, water, ground_h: geo::pos_to_lla(p).2 + if wall { 0.0 } else { pen }, building };
                 let up_right = self.up().dot(upw) > 0.0;
-                if building.is_some() && pen > 1.0 {
+                if wall && pen > 1.0 {
                     // Into the side of a building: all of the speed goes into it.
                     match part {
                         Part::Wing(s, st) => {
@@ -1501,7 +1523,7 @@ impl Plane {
                 if tl > 3.0 {
                     self.sparks.push((p, tang * 0.5));
                 }
-                if tl > 1.5 && building.is_none() {
+                if tl > 1.5 && building.is_none() && sv == DVec3::ZERO {
                     self.dirt.push((p, tang * 0.45 + upw * (2.0 + tl * 0.12), 2.5));
                 }
             }
@@ -1517,17 +1539,17 @@ impl Plane {
                 }
                 let r = leg.at;
                 let p = self.pos + self.rot * r;
-                if let Some((pen, water, building)) = hit(p, world) {
+                if let Some((pen, water, building, wall, sv)) = hit(p, world) {
                     if pen <= 0.0 {
                         continue;
                     }
-                    let pv = self.vel + self.rot * self.omega.cross(r);
+                    let pv = self.vel + self.rot * self.omega.cross(r) - sv;
                     let vn = pv.dot(upw);
                     // Wheels do nothing in water or against a wall, and a leg driven
                     // in far too hard just goes: the airframe takes the rest.
-                    if water || (building.is_some() && pen > 1.0) || pen > leg.travel * 4.0 + 0.8 {
+                    if water || (wall && pen > 1.0) || pen > leg.travel * 4.0 + 0.8 {
                         if !water {
-                            self.lose_gear(gi, if building.is_some() { "BUILDING" } else { "HARD LANDING" });
+                            self.lose_gear(gi, if building.is_some() { "BUILDING" } else if wall { "SHIP" } else { "HARD LANDING" });
                         }
                         continue;
                     }
@@ -1561,7 +1583,7 @@ impl Plane {
                     force_w += f;
                     torque_b += r.cross(self.rot.inverse() * f);
                     self.wheel_spin[gi] = vl / leg.wheel_r;
-                    if pv.length() > 3.0 && building.is_none() {
+                    if pv.length() > 3.0 && building.is_none() && sv == DVec3::ZERO {
                         self.dirt.push((p, (pv - upw * vn) * 0.3 + upw * 1.5, 1.0));
                     }
                 }
@@ -1583,6 +1605,7 @@ impl Plane {
         }
 
         self.on_hull = skidding;
+        force_w += self.push;
         let acc = force_w / spec.mass;
         self.swing_folds(dt, acc, upw, vb, rho);
         self.g_load = (acc + upw * 9.81).dot(self.up()) / 9.81;
