@@ -494,8 +494,12 @@ fn parse_args() -> Args {
             "--graphics" => {
                 let f: Vec<&str> = v.get(i + 1).map(|s| s.split(',').collect()).unwrap_or_default();
                 a.graphics = f.first().and_then(|s| settings::Preset::parse(s));
-                // (upscaler=taau|fsr: its index in Upscaler::ALL)
-                let val = |k: &str, x: &str| if k == "upscaler" { settings::Upscaler::ALL.iter().position(|u| Some(*u) == settings::Upscaler::parse(x)).map(|i| i as f32) } else { x.parse().ok() };
+                // (upscaler=taau|fsr: its index in Upscaler::ALL; water=low|high: 0 or 1)
+                let val = |k: &str, x: &str| match k {
+                    "upscaler" => settings::Upscaler::ALL.iter().position(|u| Some(*u) == settings::Upscaler::parse(x)).map(|i| i as f32),
+                    "water" => ["low", "high"].iter().position(|w| w.eq_ignore_ascii_case(x)).map(|i| i as f32).or_else(|| x.parse().ok()),
+                    _ => x.parse().ok(),
+                };
                 a.gfx_set = f.iter().skip(1).filter_map(|kv| kv.split_once('=')).filter_map(|(k, x)| Some((k.to_string(), val(k, x)?))).collect();
             }
             "--headless" => {
@@ -554,7 +558,7 @@ fn parse_args() -> Args {
                 used = 1;
             }
             "--help" | "-h" => {
-                println!("Samiam's Flight Sim\nfablegame [--menu | --no-menu] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--snow 0..1] [--cloud-base M] [--weather] [--pause-menu flight|places|weather|game|route|settings|graphics|controls[@SECONDS]] [--map-open SECONDS [--map-pick KSFO,KOAK]] [--airport CODE [--runway 28L] [--approach]] [--route KSFO,KOAK,...] [--sim-speed 1|2|4|8] [--max-zoom 8..19] [--cockpit] [--fov DEG] [--no-vsync] [--no-taa] [--render-scale 0.5..1] [--graphics low|medium|high|ultra[,scale=0.5..1,clouds=0..2,shadows=0..3,ao=0|1,bloom=0|1,terrain=0..3,msaa=0|1,dyn=0|1,target=FPS,upscaler=taau|fsr]] [--gpu-profile] [--fullscreen] [--mute] [--lang en|fr] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--boost-at SECONDS] [--damage rwing=4.3,laileron=0,rudder=0.5,prop=0.5,engine=0.4,oil=0.6,crack=1,nosegear=0,lsnap=3.4,rfold=3.2,tail=2.0]");
+                println!("Samiam's Flight Sim\nfablegame [--menu | --no-menu] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--snow 0..1] [--cloud-base M] [--weather] [--pause-menu flight|places|weather|game|route|settings|graphics|controls[@SECONDS]] [--map-open SECONDS [--map-pick KSFO,KOAK]] [--airport CODE [--runway 28L] [--approach]] [--route KSFO,KOAK,...] [--sim-speed 1|2|4|8] [--max-zoom 8..19] [--cockpit] [--fov DEG] [--no-vsync] [--no-taa] [--render-scale 0.5..1] [--graphics low|medium|high|ultra[,scale=0.5..1,clouds=0..2,shadows=0..3,ao=0|1,bloom=0|1,terrain=0..3,water=low|high,msaa=0|1,dyn=0|1,target=FPS,upscaler=taau|fsr]] [--gpu-profile] [--fullscreen] [--mute] [--lang en|fr] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--boost-at SECONDS] [--damage rwing=4.3,laileron=0,rudder=0.5,prop=0.5,engine=0.4,oil=0.6,crack=1,nosegear=0,lsnap=3.4,rfold=3.2,tail=2.0]");
                 std::process::exit(0);
             }
             other => {
@@ -841,6 +845,7 @@ impl Game {
                 "ao" => gfx.ao = on,
                 "bloom" => gfx.bloom = on,
                 "terrain" => gfx.terrain = n,
+                "water" => gfx.water = n.min(1),
                 "msaa" => gfx.msaa = on,
                 "dyn" => gfx.dyn_res = on,
                 "target" => gfx.target_fps = x.clamp(20.0, 240.0) as u32,
@@ -2109,6 +2114,9 @@ impl Game {
             ui.label(t!("Terrain detail", "Détail du terrain"));
             levels(ui, &mut g.terrain, &[low, med, high, "Ultra"]);
             ui.end_row();
+            ui.label(t!("Water", "Eau"));
+            levels(ui, &mut g.water, &[low, high]);
+            ui.end_row();
             ui.label(t!("Anti-aliasing", "Anticrénelage"));
             ui.horizontal(|ui| {
                 ui.checkbox(&mut taa, t!("temporal (TAA)", "temporel (TAA)"));
@@ -2189,6 +2197,8 @@ impl Game {
         self.r.bloom = g.bloom;
         self.r.shadow_fast = g.shadows <= 2;
         self.r.set_msaa(g.msaa);
+        self.r.set_water(g.water);
+        self.world.ocean.set_quality(g.water);
         self.r.set_upscaler(g.upscaler == settings::Upscaler::Fsr);
         self.r.set_vsync(g.vsync);
         // (the window's resize event then resizes the surface and the targets)

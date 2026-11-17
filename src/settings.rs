@@ -72,7 +72,7 @@ impl Upscaler {
 /// Graphics options (the display ones: vsync, frame rate limit, fps counter,
 /// fullscreen, and the dynamic resolution's target, are not part of presets). Levels count up from the cheapest: clouds 0..=2 (low,
 /// medium, high), shadows 0..=3 (off, low, medium, high), terrain 0..=3 (low,
-/// medium, high, ultra). Anti-aliasing stays `Settings::taa`.
+/// medium, high, ultra), water 0..=1 (low, high). Anti-aliasing stays `Settings::taa`.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Graphics {
     /// the 3D scene's resolution, a fraction of the window's (MIN_SCALE..1); with
@@ -86,6 +86,9 @@ pub struct Graphics {
     pub ao: bool,
     pub bloom: bool,
     pub terrain: u8,
+    /// the ocean's wave grids (ocean.rs `grid`): 0 Low (128 x 128, Low and
+    /// Medium), 1 High (256 x 256, High and Ultra)
+    pub water: u8,
     /// multisampled edges (MSAA 4x) under the temporal AA: sharper edges, at
     /// a high price on Apple's GPUs (all presets but Low)
     pub msaa: bool,
@@ -135,7 +138,8 @@ impl Graphics {
         };
         let msaa = p != Preset::Low;
         let dyn_res = p == Preset::Medium;
-        Self { scale, dyn_res, target_fps: 60, clouds, shadows, ao: fx, bloom: fx, terrain, msaa, upscaler: Upscaler::Taau, vsync: true, fps_limit: 0, show_fps: false, fullscreen: false }
+        let water = matches!(p, Preset::High | Preset::Ultra) as u8;
+        Self { scale, dyn_res, target_fps: 60, clouds, shadows, ao: fx, bloom: fx, terrain, water, msaa, upscaler: Upscaler::Taau, vsync: true, fps_limit: 0, show_fps: false, fullscreen: false }
     }
 
     /// Before any are saved: Medium on an integrated GPU, High on others.
@@ -168,6 +172,7 @@ impl Graphics {
             ao: kept(self.ao, start.ao, saved.ao),
             bloom: kept(self.bloom, start.bloom, saved.bloom),
             terrain: kept(self.terrain, start.terrain, saved.terrain),
+            water: kept(self.water, start.water, saved.water),
             msaa: kept(self.msaa, start.msaa, saved.msaa),
             upscaler: kept(self.upscaler, start.upscaler, saved.upscaler),
             vsync: kept(self.vsync, start.vsync, saved.vsync),
@@ -190,6 +195,8 @@ impl Graphics {
             ao: b("ambient_occlusion", d.ao),
             bloom: b("bloom", d.bloom),
             terrain: n("terrain_detail", d.terrain as u32).min(3) as u8,
+            // (before it was an option the waves were always the High ones)
+            water: n("water", 1).min(1) as u8,
             msaa: b("msaa", true),
             upscaler: j["upscaler"].as_str().and_then(Upscaler::parse).unwrap_or(d.upscaler),
             vsync: b("vsync", d.vsync),
@@ -197,12 +204,13 @@ impl Graphics {
             show_fps: b("show_fps", d.show_fps),
             fullscreen: b("fullscreen", d.fullscreen),
         };
-        // Saved before MSAA was an option (always on then): a preset's own
-        // setting if the rest is that preset, so it stays that preset.
-        if j["msaa"].is_null() {
+        // Saved before MSAA or the water quality were options: a preset's
+        // own setting for them if the rest is that preset, so it stays that preset.
+        if j["msaa"].is_null() || j["water"].is_null() {
             for integrated in [true, false] {
                 for p in Preset::ALL {
-                    let h = Self { msaa: Self::preset(p, integrated).msaa, ..g };
+                    let pp = Self::preset(p, integrated);
+                    let h = Self { msaa: if j["msaa"].is_null() { pp.msaa } else { g.msaa }, water: if j["water"].is_null() { pp.water } else { g.water }, ..g };
                     if h.preset_of(true, integrated) == Some(p) {
                         return h;
                     }
@@ -222,6 +230,7 @@ impl Graphics {
             "ambient_occlusion": self.ao,
             "bloom": self.bloom,
             "terrain_detail": self.terrain,
+            "water": self.water,
             "msaa": self.msaa,
             "upscaler": self.upscaler.code(),
             "vsync": self.vsync,
@@ -351,7 +360,7 @@ mod tests {
     fn round_trip() {
         let s = Settings { lang: Some(Lang::Fr), sound_on: false, volume: 0.4, cam_mode: 1, cockpit_fov: 50.0, look_sens: 1.5, show_hud: false, minimap: false, taa: false, live_traffic: false, live_weather: false, real_time: false, graphics: None };
         assert_eq!(Settings::from_json(&s.to_json()), s);
-        let g = Graphics { scale: 0.65, dyn_res: true, target_fps: 45, clouds: 0, shadows: 2, ao: false, bloom: true, terrain: 3, msaa: true, upscaler: Upscaler::Fsr, vsync: false, fps_limit: 60, show_fps: true, fullscreen: true };
+        let g = Graphics { scale: 0.65, dyn_res: true, target_fps: 45, clouds: 0, shadows: 2, ao: false, bloom: true, terrain: 3, water: 0, msaa: true, upscaler: Upscaler::Fsr, vsync: false, fps_limit: 60, show_fps: true, fullscreen: true };
         let s = Settings { graphics: Some(g), ..s };
         assert_eq!(Settings::from_json(&s.to_json()), s);
         // Presets are recognised again from their options, and not past a change.
@@ -370,6 +379,14 @@ mod tests {
         let mut j = Graphics::preset(Preset::Medium, true).to_json();
         j.as_object_mut().unwrap().remove("msaa");
         assert_eq!(Graphics::from_json(&j).preset_of(true, true), Some(Preset::Medium));
+        // Saved before the water quality was an option: presets stay presets
+        // (Low and Medium get the Low waves, High and Ultra the High ones).
+        for p in Preset::ALL {
+            let mut j = Graphics::preset(p, true).to_json();
+            j.as_object_mut().unwrap().remove("water");
+            let h = Graphics::from_json(&j);
+            assert_eq!((h.preset_of(true, true), h.water), (Some(p), matches!(p, Preset::High | Preset::Ultra) as u8));
+        }
         let t = Settings::from_json(&serde_json::json!({ "graphics": { "clouds": 9, "scale": 0.1, "upscaler": "xx" } }));
         assert_eq!(t.graphics.map(|g| (g.clouds, g.scale, g.shadows, g.upscaler)), Some((2, MIN_SCALE, 2, Upscaler::Taau)));
         // One-run flags are not kept; the player's own changes are.

@@ -56,7 +56,8 @@ struct Globals {
   // The ocean (ocean.rs): offset of its coordinates + direction the wind blows
   // toward (east, north); wind (m/s), significant wave height (m), whitecap
   // cover, 1; slope covariance (east-east, north-north, east-north) of the
-  // ripples shorter than any cascade; then at 3 + 9 c + m the slope covariance
+  // ripples shorter than any cascade + the finest mip level the waves are
+  // written to (0, or 1 at Low water quality: `ocean_lod`); then at 3 + 9 c + m the slope covariance
   // cascade c's mip level m no longer holds (see `ocean_lost`).
   ocean: array<vec4f, 30>,
   shore_vp: mat4x4f, // camera-relative to the shore distance field (shore.rs)
@@ -580,6 +581,9 @@ fn ocean_lost(c: i32, lv: f32) -> vec3f {
   let j = min(i + 1, 8);
   return mix(G.ocean[3 + c * 9 + i].xyz, G.ocean[3 + c * 9 + j].xyz, l - f32(i));
 }
+// A level to read the waves at, no finer than the grid the GPU runs (Low
+// water quality writes a 128 grid into level 1 and leaves level 0 alone).
+fn ocean_lod(lv: f32) -> f32 { return max(lv, G.ocean[2].w); }
 fn ocean_size(c: i32) -> f32 { return select(select(6.0, 250.0 / 6.0, c == 1), 250.0, c == 0); }
 // Sea state: how much of each wave cascade (about 250 m, 40 m and 6 m across)
 // a stretch of water shows, by its class, latitude and how open it is (shore:
@@ -599,7 +603,7 @@ fn ocean_disp(x: vec2f, sp: f32, w: vec3f) -> vec3f {
   var o = vec3f(0.0);
   for (var c = 0; c < 3; c++) {
     let L = ocean_size(c);
-    let lod = log2(max(2.0 * sp * 256.0 / L, 1.0));
+    let lod = ocean_lod(log2(max(2.0 * sp * 256.0 / L, 1.0)));
     if (lod < 8.0 && w[c] > 0.0) {
       o += textureSampleLevel(t_ocean, s_repeat, x / L, c, lod).xyz * w[c];
     }

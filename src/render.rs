@@ -2250,6 +2250,11 @@ impl Renderer {
         }
     }
 
+    /// The ocean's wave grids (Graphics `water`: 0 Low, 1 High; ocean.rs `grid`).
+    pub fn set_water(&mut self, quality: u8) {
+        self.ocean.set_quality(&self.queue, quality);
+    }
+
     /// Multisample the G-buffer (Graphics `msaa`: every preset but Low).
     pub fn set_msaa(&mut self, on: bool) {
         if on != self.msaa {
@@ -2638,7 +2643,7 @@ impl Renderer {
             Some(ff) => self.fluid.compute(q, &mut enc, ff),
             None => self.fluid.live = false,
         }
-        self.ocean.compute(q, &mut enc, &f.ocean);
+        self.ocean.compute(q, &mut enc, &f.ocean, self.prof.as_ref());
         if f.g.weather[3] != self.lut_haze {
             self.lut_haze = f.g.weather[3];
             self.lut_bake.draw(&mut enc);

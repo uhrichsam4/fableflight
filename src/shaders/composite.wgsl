@@ -16,7 +16,11 @@ fn wtex(uv: vec2f, size: f32, fp: f32) -> vec4f {
   return textureSampleLevel(t_wave, s_repeat, uv, log2(max(fp * 256.0 / size, 1.0)));
 }
 
-fn ssr(P: vec3f, R: vec3f, jit: f32) -> vec4f {
+// sides: a ray that leaves the screen sideways (water) is held at the
+// screen's edge and marched on, reading the scenery there, instead of
+// giving up on it: a reflection of hills along the horizon then runs out to
+// the screen's edges, not into a band of sky at each side.
+fn ssr(P: vec3f, R: vec3f, jit: f32, sides: bool) -> vec4f {
   let dims = vec2f(textureDimensions(t_depth));
   var step_len = max(length(P) * 0.012, 0.4);
   var t = step_len * (0.5 + jit);
@@ -26,8 +30,12 @@ fn ssr(P: vec3f, R: vec3f, jit: f32) -> vec4f {
     let clip = G.view_proj * vec4f(q, 1.0);
     if (clip.w <= 0.0) { break; }
     let ndc = clip.xyz / clip.w;
-    let uv = ndc.xy * vec2f(0.5, -0.5) + 0.5;
-    if (any(uv < vec2f(0.0)) || any(uv > vec2f(1.0))) { break; }
+    var uv = ndc.xy * vec2f(0.5, -0.5) + 0.5;
+    if (uv.y < 0.0 || uv.y > 1.0) { break; }
+    if (uv.x < 0.0 || uv.x > 1.0) {
+      if (!sides) { break; }
+      uv.x = clamp(uv.x, 0.5 / dims.x, 1.0 - 0.5 / dims.x);
+    }
     let zs = textureLoad(t_depth, vec2i(uv * dims), 0);
     if (zs > ndc.z) {
       // Behind a surface: is it a thin enough crossing to be a real hit?
@@ -42,13 +50,25 @@ fn ssr(P: vec3f, R: vec3f, jit: f32) -> vec4f {
         let c2 = G.view_proj * vec4f(P + R * m, 1.0);
         let n2 = c2.xyz / c2.w;
         huv = n2.xy * vec2f(0.5, -0.5) + 0.5;
+        if (sides) { huv.x = clamp(huv.x, 0.5 / dims.x, 1.0 - 0.5 / dims.x); }
         if (textureLoad(t_depth, vec2i(huv * dims), 0) > n2.z) { hi = m; } else { lo = m; }
       }
-      let px = vec2i(huv * dims);
-      let c = textureLoad(t_color, px, 0);
+      var px = vec2i(huv * dims);
+      var c = textureLoad(t_color, px, 0);
       // (any water share at all: its samples hold the unlit tint, not a colour)
-      if (textureLoad(t_aux, px, 0).a > 0.004 || c.a < 0.99 || textureLoad(t_depth, px, 0) == 0.0) { break; }
-      let e = min(min(huv.x, 1.0 - huv.x), min(huv.y, 1.0 - huv.y));
+      var bad = textureLoad(t_aux, px, 0).a > 0.004 || c.a < 0.99;
+      // Water: a reflection reaching the waterline of a far shore lands on
+      // its mixed pixels; the land a few pixels up stands in for it, or the
+      // reflection would part from the shore by a band of sky.
+      if (sides) {
+        for (var k = 0; k < 6 && bad; k++) {
+          px.y = max(px.y - 1, 0);
+          c = textureLoad(t_color, px, 0);
+          bad = textureLoad(t_aux, px, 0).a > 0.004 || c.a < 0.99;
+        }
+      }
+      if (bad || textureLoad(t_depth, px, 0) == 0.0) { break; }
+      let e = select(min(min(huv.x, 1.0 - huv.x), min(huv.y, 1.0 - huv.y)), min(huv.y, 1.0 - huv.y), sides);
       return vec4f(c.rgb, smoothstep(0.0, 0.08, e));
     }
     prev = t;
@@ -95,6 +115,22 @@ fn sea_glint(Ls: vec3f, V: vec3f, N: vec3f, Tx: vec3f, Ty: vec3f, cv: vec3f) -> 
   let fr = 0.02 + 0.98 * pow(1.0 - max(dot(-V, H), 0.0), 5.0);
   let g = 1.0 + smith_lambda(zl, az_var(Ls, Tx, Ty, cv)) + smith_lambda(zv, az_var(-V, Tx, Ty, cv));
   return fr * p / (4.0 * zv * zh * zh * zh * zh * g);
+}
+
+// Slope covariance a cascade loses when read with anisotropic filtering: the
+// pixel's footprint is long along the view (level la) and short across it
+// (level lh, what the lookup reads). Along the view it loses what the long
+// side averages away, across it what the short side does.
+fn ocean_lost_aniso(c: i32, la: f32, lh: f32, vh: vec2f, vc: vec2f) -> vec3f {
+  let A = ocean_lost(c, la);
+  let C = ocean_lost(c, lh);
+  let va = A.x * vh.x * vh.x + 2.0 * A.z * vh.x * vh.y + A.y * vh.y * vh.y;
+  let vb = C.x * vc.x * vc.x + 2.0 * C.z * vc.x * vc.y + C.y * vc.y * vc.y;
+  let lim = sqrt(max(va * vb, 0.0));
+  let ab = clamp(C.x * vh.x * vc.x + C.z * (vh.x * vc.y + vh.y * vc.x) + C.y * vh.y * vc.y, -lim, lim);
+  return vec3f(va * vh.x * vh.x + vb * vc.x * vc.x + 2.0 * ab * vh.x * vc.x,
+               va * vh.y * vh.y + vb * vc.y * vc.y + 2.0 * ab * vh.y * vc.y,
+               va * vh.x * vh.y + vb * vc.x * vc.y + ab * (vh.x * vc.y + vc.x * vh.y));
 }
 
 // ------------------------------------------------------------ breakers
@@ -221,15 +257,18 @@ fn breakers(wc: vec2f, sh: ShoreAt, wclass: f32, fp: f32, t: f32) -> Surf {
   var foam = br0 * (fr * surf_exp(u, 16.0, b) + (1.0 - fr) * surf_exp(u, 3.0, b)) + br1 * (fr * surf_exp(u - 1.0, 16.0, b) + (1.0 - fr) * surf_exp(u - 1.0, 3.0, b));
   // Far off the pattern is finer than a pixel: its mean over a cycle.
   let dbm = max(H0 * 0.9 / 0.78 - h0, 0.0) / s;
-  let mean = smoothstep(dbm * 1.15 + 0.5, dbm * 0.7, d) * 0.22;
+  // (seen from afar the surf zone is a band of white water, the bores and
+  // the foam they leave run together: smeared over the footprint, so a zone
+  // narrower than a pixel still shows as the pale line it is)
+  let mean = smoothstep(dbm * 1.15 + 0.5 + fp, dbm * 0.7, d) * 0.42;
   foam = mix(foam, mean, far);
   // Spent foam milky over the whole surf zone.
-  foam += 0.18 * smoothstep(dbm * 1.2 + 0.5, dbm * 0.3, d);
+  foam += 0.24 * smoothstep(dbm * 1.2 + 0.5 + 0.5 * fp, dbm * 0.3, d);
   // The swash: a fringe at the water's edge, widest as each bore arrives.
   let us = fract(psi / (2.0 * PI) + t / T);
   let ws = wmax * (0.25 + 0.75 * pow(1.0 - us, 2.0)) * (0.7 + 0.6 * surf_hash(i32(floor(psi / (2.0 * PI) + t / T))));
   let fringe = smoothstep(ws + 0.4 + fp, ws * 0.4, sh.d0);
-  foam = max(foam, mix(fringe, smoothstep(wmax + fp, 0.0, sh.d0) * 0.5, smoothstep(0.3, 1.0, fp / wmax)));
+  foam = max(foam, mix(fringe, smoothstep(wmax + fp, 0.0, sh.d0) * 0.75, smoothstep(0.3, 1.0, fp / wmax)));
   o.foam = clamp(foam, 0.0, 1.0) * fk * sh.w;
 
   // The swell's shape: a long back and a short, steep face toward the shore
@@ -252,7 +291,7 @@ fn breakers(wc: vec2f, sh: ShoreAt, wclass: f32, fp: f32, t: f32) -> Surf {
 
 fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> vec3f {
   // Keep the water parameters in their physical ranges.
-  let wd = max(aux.x, 0.0);
+  var wd = max(aux.x, 0.0);
   let wclass = clamp(aux.y, 0.0, 3.0);
   let shore = clamp(aux.z, 0.0, 1.0);
   var l = light_at(P);
@@ -266,6 +305,10 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   let t = G.time.x;
   let cosv = max(dot(-V, upn), 0.03);
   let fp = dist * G.misc.w / cosv;                // pixel footprint along the view direction, metres
+  let fpc = dist * G.misc.w;                      // and across it
+  // The view's direction over the surface (east, north), and across it.
+  let vh = normalize(vec2f(dot(V, e), dot(V, n)) + vec2f(1e-6, 0.0));
+  let vc = vec2f(-vh.y, vh.x);
   var st = sea_state(wclass, upn.z, shore);
   let wind = G.ocean[1].x;
 
@@ -283,17 +326,38 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   let calm = 1.0 - smoothstep(1.5, 7.0, wind);
   let ruffle = smoothstep(0.28, 0.72, g1r * 0.65 + g2g * 0.45 - 0.02 + 0.2 * (1.0 - st.z) - 0.3 * calm);
   // Gusts raise the short waves most.
-  st.z *= mix(0.3, 1.2, ruffle);
+  // (on lakes and rivers, sheltered from the swell, the lulls go glassy)
+  st.z *= mix(select(0.3, 0.12, wclass > 1.5), 1.2, ruffle);
   st.y *= mix(0.8, 1.1, ruffle);
   // Breakers along the shore, from the distance to it.
-  let surf = breakers(wc, shore_at(P), wclass, fp, t);
+  let sh = shore_at(P);
+  let surf = breakers(wc, sh, wclass, fp, t);
+  // The bed shelves up to the beach (the bathymetry is far too coarse to
+  // show it): as deep as the beach `breakers` runs the swell over, so the
+  // sand shows through green shallows just where the waves break.
+  if (sh.w > 0.0 && sh.d0 < G.shore.z - 2.0) {
+    let nb = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 2600.0, 0.43), 0.0).r;
+    var sb = mix(0.06, 0.02, smoothstep(0.15, 0.7, sh.hb));
+    if (wclass > 2.5) { sb = 0.08; } else if (wclass > 1.5) { sb = 0.06; }
+    sb *= mix(0.55, 1.7, smoothstep(0.25, 0.75, nb));
+    wd = mix(wd, min(wd, 0.1 + sb * sh.d0), sh.w);
+  }
 
   // The FFT ocean (ocean.wgsl). This pixel is where the sideways shift
   // carried a surface point to: find that point first (two fixed-point steps
   // over the cascades that move it most), then read its slopes.
   let xo = ocean_coord(P);
+  // lod: the level of the footprint's long side; lodh: what an anisotropic
+  // lookup reads (its short side, or an eighth of the long one: eight taps).
   var lod = vec3f(0.0);
-  for (var c = 0; c < 3; c++) { lod[c] = log2(max(fp * 256.0 / ocean_size(c), 1.0)); }
+  var lodh = vec3f(0.0);
+  let fph = max(fp * 0.125, fpc);
+  for (var c = 0; c < 3; c++) {
+    lod[c] = ocean_lod(log2(max(fp * 256.0 / ocean_size(c), 1.0)));
+    lodh[c] = ocean_lod(log2(max(fph * 256.0 / ocean_size(c), 1.0)));
+  }
+  // (the lookups' footprint no smaller than a texel of the finest level written)
+  let gmin = select(0.0, 2.02 / 256.0, G.ocean[2].w > 0.5);
   var x0 = xo;
   var hgt = 0.0;
   for (var it = 0; it < 2; it++) {
@@ -318,14 +382,19 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
     let w = st[c];
     if (w <= 0.0) { continue; }
     let L = ocean_size(c);
-    if (lod[c] < 8.0) {
-      let a = textureSampleLevel(t_ocean, s_repeat, x0 / L, c, lod[c]);
-      let b = textureSampleLevel(t_ocean, s_repeat, x0 / L, c + 3, lod[c]);
+    if (lodh[c] < 8.0) {
+      // Filtered along the footprint (s_detail repeats, 8x anisotropic):
+      // far water keeps the waves that run across the view instead of
+      // losing them all to the footprint's long side.
+      let ga = vh * max(fp / L, gmin);
+      let gc = vc * max(fpc / L, gmin);
+      let a = textureSampleGrad(t_ocean, s_detail, x0 / L, c, ga, gc);
+      let b = textureSampleGrad(t_ocean, s_detail, x0 / L, c + 3, ga, gc);
       sl += b.xy * w;
       jd += vec3f(b.zw, a.w) * w;
       if (c < 2) { jd01 += vec3f(b.zw, a.w) * w; }
     }
-    cv += ocean_lost(c, lod[c]) * (w * w);
+    cv += ocean_lost_aniso(c, lod[c], lodh[c], vh, vc) * (w * w);
   }
   // The swell running in to the shore, where it is finer than a pixel.
   cv += surf.sv;
@@ -348,8 +417,6 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   let Ty = cross(N, Tx);
 
   // Slope variance along the direction we look and across it.
-  let vh = normalize(vec2f(dot(V, e), dot(V, n)) + vec2f(1e-6, 0.0));
-  let vc = vec2f(-vh.y, vh.x);
   let sv2 = cv.x * vh.x * vh.x + 2.0 * cv.z * vh.x * vh.y + cv.y * vh.y * vh.y;
   let sc2 = cv.x * vc.x * vc.x + 2.0 * cv.z * vc.x * vc.y + cv.y * vc.y * vc.y;
   let sv = sqrt(max(sv2, 0.0));
@@ -385,7 +452,7 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
     // the reflected point moves only a few hundred metres - the clouds then
     // reflect as smooth, wave-wobbled shapes, as they do on real water.
     let hc = max(mid - l.h, 100.0);
-    let kc = clamp(1500.0 * cosv * cosv / hc, 0.0, 1.0);
+    let kc = clamp(2500.0 * cosv * cosv / hc, 0.0, 1.0);
     let Nc = normalize(upn + (N - upn) * kc);
     // The unresolved facets smear the reflection along the view, into a
     // vertical streak (as the sky above): three reflections across that lobe
@@ -410,7 +477,9 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
     }
     if (cov_c > 0.0) {
       let lc = light_at(P + Rc0 * min(tc0, 90000.0));
-      refl = mix(refl, (lc.sun * 0.05 + lc.amb * 1.3), cov_c);
+      // (what the water sees is the cloud's shaded base, hardly brighter
+      // than the sky low down around it)
+      refl = mix(refl, (lc.sun * 0.03 + lc.amb * 0.9), cov_c * 0.85);
     }
   }
   if (G.misc.z > 0.5) {
@@ -419,9 +488,15 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
     // pixel spans many waves) keeps the wobble while the reflection holds together.
     let ks = mix(0.5, 0.12, smoothstep(250.0, 2500.0, dist));
     var Rs = reflect(V, normalize(upn + (Nw - upn) * ks));
-    Rs = normalize(Rs + upn * max(0.03 - dot(Rs, upn), 0.0));
-    let hit = ssr(P, Rs, 0.5);
-    refl = mix(refl, hit.rgb, hit.a);
+    // (barely lifted off the water: the far shore stands only a degree or
+    // two above the horizon, and a reflection lifted past it starts above it)
+    Rs = normalize(Rs + upn * max(0.004 - dot(Rs, upn), 0.0));
+    let hit = ssr(P, Rs, 0.5, true);
+    // Ripples spread the reflection over a lobe some 2 dv high (dv: the
+    // slope spread along the view): scenery a degree or two tall fills less
+    // and less of it. Calm water a mirror, rippled water a faint smear of
+    // the scenery into the sky's mean.
+    refl = mix(refl, hit.rgb, hit.a * clamp(0.025 / max(dv, 1e-4), 0.08, 1.0));
   }
 
   // Sun and moon glitter: the facets' slope distribution (anisotropic
@@ -435,14 +510,18 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   let alat = abs(upn.z);
   let trop = 1.0 - smoothstep(0.33, 0.58, alat);
   let polar = smoothstep(0.78, 0.93, alat);
+  // body x 3.2 is the light the water itself sends back (diffuse
+  // reflectance): open ocean some 3 % in the blue, 1 % in the green and
+  // next to nothing in the red - a deep navy - greener toward the poles;
+  // lakes darker and greener, rivers brown with silt.
   var turb = mix(0.8, 0.06, trop);
-  var body = mix(vec3f(0.004, 0.024, 0.046), vec3f(0.003, 0.05, 0.075), trop);
-  body = mix(body, vec3f(0.006, 0.022, 0.03), polar);
+  var body = mix(vec3f(0.0008, 0.0046, 0.0105), vec3f(0.0006, 0.0036, 0.0128), trop);
+  body = mix(body, vec3f(0.0012, 0.0045, 0.0058), polar);
   var weedy = mix(1.0, 0.82, trop);
-  if (wclass > 2.5) { turb = 3.2; body = vec3f(0.045, 0.048, 0.022); weedy = 0.9; }
-  else if (wclass > 1.5) { turb = 1.5; body = vec3f(0.012, 0.03, 0.022); weedy = 1.1; }
+  if (wclass > 2.5) { turb = 3.2; body = vec3f(0.012, 0.0125, 0.0065); weedy = 0.9; }
+  else if (wclass > 1.5) { turb = 1.0; body = vec3f(0.0016, 0.0046, 0.004); weedy = 1.1; }
   let tl = max(luma(tint), 0.015);
-  body = mix(body, tint / tl * luma(body), 0.4);
+  body = mix(body, tint / tl * luma(body), 0.3);
   let ext = vec3f(0.36, 0.052, 0.024) + vec3f(0.22, 0.2, 0.3) * turb;
 
   // Refraction down to the bed.
@@ -518,8 +597,9 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   // The breaking itself: solid white right on the folding crest, sharp at
   // this pixel's own fold, where the foam is fresh.
   let crest = fz.g * smoothstep(fz.b + 0.12, fz.b - 0.08, J01);
-  foam += max(spent, crest) * capw * mix(0.95, 0.75, far_a);
-  foam = clamp(foam * fnear, 0.0, 1.0);
+  // (the whitecaps fade out with distance; the surf, a band along the
+  // shore, stays as far as the shore field reaches)
+  foam = clamp(foam + max(spent, crest) * capw * mix(0.95, 0.75, far_a) * fnear, 0.0, 1.0);
   // White water churned up where a crash went in (main.rs, Crash::foam):
   // a solid boil at first that soon breaks up into lace and streaks as it
   // spreads and fades, over water turned pale green by the air in it.
@@ -647,7 +727,7 @@ fn composite_sample(in: FsIn, z: f32, c0: vec4f, a0: vec4f, amb: f32) -> vec3f {
     // in that direction on screen - the neighbouring towers, the street.
     let Ng = normalize(aux.xyz);
     let R = reflect(rd, Ng);
-    let hit = ssr(P + Ng * 0.25, R, jit);
+    let hit = ssr(P + Ng * 0.25, R, jit, false);
     if (hit.a > 0.0) {
       let upn = normalize(P - G.planet.xyz);
       let env = env_reflect(P, R, upn, dist < 2500.0);

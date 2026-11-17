@@ -9,7 +9,16 @@
 // choppiness) and its derivatives. `foam` keeps the whitecaps (layer 6, see
 // there) and `foam_ctl` steers how much of the sea they cover. `mip` builds
 // the mip chain.
-const N = 256u;
+//
+// The grid is NN x NN (the Water quality: 256 at High, 128 at Low, set per
+// pipeline, ocean.rs `OceanGpu`). The workgroups and the shared FFT buffer
+// stay sized for 256, the most; at 128 half the threads sit out. A 128 grid
+// is written into level 1 of the texture (128 x 128), so the shaders that
+// read it see the same tile in the same coordinates, one level coarser.
+override NN: u32 = 256u;
+override LOGN: u32 = 8u;
+// stride of the four rows in `buf`
+const B = 256u;
 const GRAV = 9.81;
 const PI = 3.14159265;
 
@@ -89,13 +98,13 @@ fn spectrum(c: u32, x: u32, y: u32) -> Z4 {
   if (x == 0u || y == 0u) { return o; }
   let L = U.casc[c].x;
   let dk = 2.0 * PI / L;
-  let kv = vec2f(f32(i32(x) - 128), f32(i32(y) - 128)) * dk;
+  let kv = vec2f(f32(i32(x) - i32(NN / 2u)), f32(i32(y) - i32(NN / 2u))) * dk;
   let k = length(kv);
   if (k <= 0.0 || k < U.casc[c].y || k >= U.casc[c].z) { return o; }
   let a = dk * sqrt(0.5);
-  let base = c * N * N;
-  let h0p = noise[base + y * N + x] * (sqrt(energy(kv, k)) * a);
-  let h0m = noise[base + ((N - y) & 255u) * N + ((N - x) & 255u)] * (sqrt(energy(-kv, k)) * a);
+  let base = c * NN * NN;
+  let h0p = noise[base + y * NN + x] * (sqrt(energy(kv, k)) * a);
+  let h0m = noise[base + ((NN - y) % NN) * NN + ((NN - x) % NN)] * (sqrt(energy(-kv, k)) * a);
   // Deep water with surface tension; frequencies quantised so the sea repeats exactly.
   let w = floor(sqrt(GRAV * k * (1.0 + k * k / 136900.0)) / U.t.y) * U.t.y;
   let ph = w * U.t.x;
@@ -128,7 +137,6 @@ fn spectrum(c: u32, x: u32, y: u32) -> Z4 {
 //    share q of the sea; `foam_ctl` turns q until the foam's mean cover meets
 //    Monahan & O'Muircheartaigh's W = 3.84e-6 U^3.41.
 // Layer 6 then holds (foam cover 0..1, fresh foam 0..1, threshold, 0).
-const FN = 256u;
 const FOAM_BINS = 128u;
 const J_LO = -1.5;
 const J_HI = 1.5;
@@ -151,8 +159,8 @@ var<workgroup> wh: array<atomic<u32>, 128>;
 var<workgroup> wsum: atomic<u32>;
 
 fn foam_at(p: vec2i) -> vec2f {
-  let q = (p + vec2i(i32(FN))) % vec2i(i32(FN));
-  return foam_src[u32(q.y) * FN + u32(q.x)];
+  let q = (p + vec2i(i32(NN))) % vec2i(i32(NN));
+  return foam_src[u32(q.y) * NN + u32(q.x)];
 }
 // Last frame's foam at texel coordinates p (bilinear, wrapping).
 fn foam_bilin(p: vec2f) -> vec2f {
@@ -178,7 +186,7 @@ fn foam(@builtin(global_invocation_id) id: vec3u, @builtin(local_invocation_inde
   let b0 = textureLoad(mip_src, vec2u(x, y), 3, 0);
   var inj = 0.0;
   for (var k = 0u; k < 36u; k++) {
-    let p1 = vec2u(x * 6u + k % 6u, y * 6u + k / 6u) % vec2u(FN);
+    let p1 = vec2u(x * 6u + k % 6u, y * 6u + k / 6u) % vec2u(NN);
     let a1 = textureLoad(mip_src, p1, 1, 0);
     let b1 = textureLoad(mip_src, p1, 4, 0);
     let dxx = b0.z + b1.z;
@@ -191,14 +199,14 @@ fn foam(@builtin(global_invocation_id) id: vec3u, @builtin(local_invocation_inde
   }
   // The foam drifts downwind with the surface (about 3 % of the wind).
   let L0 = U.casc[0].x;
-  let drift = U.dir.xy * (0.03 * U.sea.x) * dt * f32(FN) / L0;
+  let drift = U.dir.xy * (0.03 * U.sea.x) * dt * f32(NN) / L0;
   var f = foam_bilin(vec2f(f32(x), f32(y)) - drift);
   // Spent foam lasts longer in a stronger wind (bigger breakers, more air).
   let tau = mix(3.5, 7.0, smoothstep(6.0, 18.0, U.sea.x));
   let cover = f.x * exp(-dt / tau) + (1.0 - f.x) * (1.0 - exp(-dt * 8.0 * inj));
   let fresh = max(f.y * exp(-dt / 0.6), inj);
   f = clamp(vec2f(cover, fresh), vec2f(0.0), vec2f(1.0));
-  foam_dst[y * FN + x] = f;
+  foam_dst[y * NN + x] = f;
   textureStore(foam_t, vec2u(x, y), 0, vec4f(f, bias, 0.0));
   atomicAdd(&wsum, u32(f.x * 255.0 + 0.5));
   workgroupBarrier();
@@ -211,7 +219,7 @@ fn foam(@builtin(global_invocation_id) id: vec3u, @builtin(local_invocation_inde
 
 @compute @workgroup_size(1)
 fn foam_ctl() {
-  let n = f32(FN * FN);
+  let n = f32(NN * NN);
   let cover = f32(atomicLoad(&ctl.sum)) / 255.0 / n;
   let u = max(U.sea.x, 0.0);
   let W = min(3.84e-6 * pow(u, 3.41), 0.3);
@@ -241,14 +249,14 @@ fn foam_ctl() {
   atomicStore(&ctl.sum, 0u);
 }
 
-fn bitrev(x: u32) -> u32 { return reverseBits(x) >> 24u; }
+fn bitrev(x: u32) -> u32 { return reverseBits(x) >> (32u - LOGN); }
 
-// In-place inverse radix-2 FFT of the four 256-point rows in `buf`
+// In-place inverse radix-2 FFT of the four NN-point rows in `buf`
 // (loaded in bit-reversed order).
 fn fft(t: u32) {
-  for (var s = 0u; s < 8u; s++) {
+  for (var s = 0u; s < LOGN; s++) {
     workgroupBarrier();
-    if (t < 128u) {
+    if (t < NN / 2u) {
       let hw = 1u << s;
       let pos = t & (hw - 1u);
       let i0 = ((t >> s) << (s + 1u)) + pos;
@@ -256,10 +264,10 @@ fn fft(t: u32) {
       let a = PI * f32(pos) / f32(hw);
       let w = vec2f(cos(a), sin(a));
       for (var f = 0u; f < 4u; f++) {
-        let p = buf[f * N + i0];
-        let q = cmul(buf[f * N + i1], w);
-        buf[f * N + i0] = p + q;
-        buf[f * N + i1] = p - q;
+        let p = buf[f * B + i0];
+        let q = cmul(buf[f * B + i1], w);
+        buf[f * B + i0] = p + q;
+        buf[f * B + i1] = p - q;
       }
     }
   }
@@ -271,15 +279,19 @@ fn rows(@builtin(local_invocation_id) lid: vec3u, @builtin(workgroup_id) wid: ve
   let x = lid.x;
   let y = wid.x;
   let c = wid.y;
-  let z = spectrum(c, x, y);
-  let r = bitrev(x);
-  buf[r] = z.a;
-  buf[N + r] = z.b;
-  buf[2u * N + r] = z.c;
-  buf[3u * N + r] = z.d;
+  if (x < NN) {
+    let z = spectrum(c, x, y);
+    let r = bitrev(x);
+    buf[r] = z.a;
+    buf[B + r] = z.b;
+    buf[2u * B + r] = z.c;
+    buf[3u * B + r] = z.d;
+  }
   fft(x);
-  for (var f = 0u; f < 4u; f++) {
-    spec[((c * 4u + f) * N + y) * N + x] = buf[f * N + x];
+  if (x < NN) {
+    for (var f = 0u; f < 4u; f++) {
+      spec[((c * 4u + f) * NN + y) * NN + x] = buf[f * B + x];
+    }
   }
 }
 
@@ -288,17 +300,20 @@ fn cols(@builtin(local_invocation_id) lid: vec3u, @builtin(workgroup_id) wid: ve
   let y = lid.x;
   let x = wid.x;
   let c = wid.y;
-  let r = bitrev(y);
-  for (var f = 0u; f < 4u; f++) {
-    buf[f * N + r] = spec[((c * 4u + f) * N + y) * N + x];
+  if (y < NN) {
+    let r = bitrev(y);
+    for (var f = 0u; f < 4u; f++) {
+      buf[f * B + r] = spec[((c * 4u + f) * NN + y) * NN + x];
+    }
   }
   fft(y);
-  // Wavenumbers run from -N/2: that shifts every other texel's sign.
+  if (y >= NN) { return; }
+  // Wavenumbers run from -NN/2: that shifts every other texel's sign.
   let sg = select(1.0, -1.0, ((x + y) & 1u) == 1u);
   let a = buf[y] * sg;
-  let b = buf[N + y] * sg;
-  let s = buf[2u * N + y] * sg;
-  let d = buf[3u * N + y] * sg;
+  let b = buf[B + y] * sg;
+  let s = buf[2u * B + y] * sg;
+  let d = buf[3u * B + y] * sg;
   let lam = U.casc[c].w;
   textureStore(out_t, vec2u(x, y), c, vec4f(a * lam, b.x, b.y * lam));
   textureStore(out_t, vec2u(x, y), c + 3u, vec4f(s, d * lam));
