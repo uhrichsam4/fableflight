@@ -118,6 +118,8 @@ pub enum Event {
     Crunch(f32),
     /// something big going into the water (~0.2 .. 2)
     Splash(f32),
+    /// the Destruction mode's lasers firing (~1)
+    Laser(f32),
 }
 
 #[derive(Default)]
@@ -1194,6 +1196,15 @@ impl Synth {
             Event::Crunch(s) => {
                 let s = s.min(2.0);
                 let v = Voice::new(0.6, r.range(-0.5, 0.5), Bus::Mid).pulses(160.0, 15.0, true, 0.9 * s).res([r.range(800.0, 1100.0), r.range(2200.0, 3000.0)], [3.0, 4.0], [0.4, 0.25]).noise(4200.0, 3000.0, 0.7, 0.8 * s, 0.25).tone(70.0, 45.0, 0.5 * s, 0.06);
+                self.push(v);
+            }
+            Event::Laser(s) => {
+                // The snap of a structural failure, made over into a laser's
+                // "pew": its gliding tone swept down fast from high up, its
+                // noise a short bright hiss, no ringing.
+                let s = s.min(2.0);
+                let f0 = r.range(2300.0, 2700.0);
+                let v = Voice::new(0.2, r.range(-0.2, 0.2), Bus::Mid).tone(f0, f0 * 0.16, 0.3 * s, 0.07).noise(6000.0, 2000.0, 1.2, 0.25 * s, 0.025);
                 self.push(v);
             }
             Event::Splash(s) => {

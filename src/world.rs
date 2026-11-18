@@ -7,7 +7,7 @@ use crate::render::{BuildGpu, DetailDraw, Inst, NearDraw, Renderer, TileGpu, Tre
 use crate::roads::RoadNet;
 use crate::trees::{lod_span, tree_jit, NearCell, TreeDim, Under, CARDS, CARD_RANGE, IMP_DIST, LODS, LOD_DIST, LOD_JITTER, TREE_SPECIES, VARIANTS};
 use crate::sources::{Job, JobResult, Loader, DATA_ZOOM, GRID, GV};
-use glam::{DMat4, DVec3, DVec4, Vec3};
+use glam::{DMat4, DVec2, DVec3, DVec4, Vec3};
 use std::collections::{HashMap, VecDeque};
 
 struct Tile {
@@ -684,6 +684,69 @@ impl World {
     pub fn footprint(&self, tile: TileId, idx: usize) -> Option<(f64, f64, f32)> {
         let Some(BSlot::Ready(b)) = self.builds.get(&tile) else { return None };
         b.footprints.get(idx).filter(|f| f.alive).map(|f| (f.base as f64, f.top as f64, f.area))
+    }
+
+    /// A standing building's wall colour (for the bits knocked off it).
+    pub fn building_col(&self, tile: TileId, idx: usize) -> Option<[u8; 3]> {
+        let Some(BSlot::Ready(b)) = self.builds.get(&tile) else { return None };
+        b.footprints.get(idx).filter(|f| f.alive).map(|f| f.col)
+    }
+
+    /// The first standing building (hidden under the 3D tiles or not) a ray
+    /// from `from` along the unit `dir` goes into within `len` m: how far,
+    /// and which (tile, footprint). Rays of a couple of km at most.
+    pub fn ray_building(&self, from: DVec3, dir: DVec3, len: f64) -> Option<(f64, TileId, usize)> {
+        let mid = from + dir * (len * 0.5);
+        let (lat, lon, _) = geo::pos_to_lla(mid);
+        let c = TileId::at(lat, lon, DATA_ZOOM);
+        let size = 1i64 << DATA_ZOOM;
+        // (a tile's size in metres: its footprints' outlines are in fractions of it)
+        let tile_m = geo::R * std::f64::consts::TAU * lat.cos() / size as f64;
+        let mut best: Option<(f64, TileId, usize)> = None;
+        for dy in -1..=1i64 {
+            for dx in -1..=1i64 {
+                let (x, y) = ((c.x as i64 + dx).rem_euclid(size), c.y as i64 + dy);
+                if y < 0 || y >= size {
+                    continue;
+                }
+                let id = TileId::new(DATA_ZOOM, x as u32, y as u32);
+                let Some(BSlot::Ready(b)) = self.builds.get(&id) else { continue };
+                let o = from - b.center;
+                for (i, f) in b.footprints.iter().enumerate() {
+                    if !f.alive || f.kind != 0 || f.ring.len() < 3 {
+                        continue;
+                    }
+                    let fc = f.center.as_dvec3();
+                    let ext = ((f.max[0] - f.min[0]).max(f.max[1] - f.min[1]) as f64) * tile_m;
+                    let reach = ext * 0.75 + (f.top - f.base) as f64 + 2.0;
+                    let tlim = best.map_or(len, |b| b.0);
+                    let t = (fc - o).dot(dir).clamp(0.0, tlim);
+                    if (o + dir * t - fc).length() > reach {
+                        continue;
+                    }
+                    // In a frame of its own: east, north, up from the middle of its base.
+                    let c_abs = b.center + fc;
+                    let (e, n, u) = geo::enu(c_abs);
+                    let hc = geo::pos_to_lla(c_abs).2;
+                    let ring: Vec<DVec2> = f
+                        .ring
+                        .iter()
+                        .map(|q| {
+                            let (la, lo) = id.lat_lon(q[0] as f64, q[1] as f64);
+                            let p = geo::lla_to_pos(la, lo, hc) - c_abs;
+                            DVec2::new(p.dot(e), p.dot(n))
+                        })
+                        .collect();
+                    let lo = from - c_abs;
+                    let lo = DVec3::new(lo.dot(e), lo.dot(n), lo.dot(u));
+                    let ld = DVec3::new(dir.dot(e), dir.dot(n), dir.dot(u));
+                    if let Some(t) = crate::destroy::ray_prism(lo, ld, &ring, f.base as f64 - hc, f.top as f64 - hc, tlim) {
+                        best = Some((t, id, i));
+                    }
+                }
+            }
+        }
+        best
     }
 
     pub fn buildings_near(&self, p: DVec3, r: f64, max_area: f32) -> Vec<(TileId, usize)> {

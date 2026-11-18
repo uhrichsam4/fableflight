@@ -86,6 +86,8 @@ pub struct State {
     pub flaps: f32,
     pub thr: f32,
     pub crashed: bool,
+    /// firing its lasers (Destruction mode), drawn for the others
+    pub laser: bool,
     /// the sender's own clock (s since its game started)
     pub t: f64,
 }
@@ -97,7 +99,7 @@ impl State {
         let [qx, qy, qz, qw] = self.q;
         let [vx, vy, vz] = self.vel;
         format!(
-            "{{\"n\":{name},\"a\":{},\"p\":[{:.7},{:.7},{:.2}],\"q\":[{qx:.5},{qy:.5},{qz:.5},{qw:.5}],\"v\":[{vx:.2},{vy:.2},{vz:.2}],\"g\":{:.2},\"f\":{:.2},\"h\":{:.2},\"c\":{},\"ts\":{:.3}}}",
+            "{{\"n\":{name},\"a\":{},\"p\":[{:.7},{:.7},{:.2}],\"q\":[{qx:.5},{qy:.5},{qz:.5},{qw:.5}],\"v\":[{vx:.2},{vy:.2},{vz:.2}],\"g\":{:.2},\"f\":{:.2},\"h\":{:.2},\"c\":{},\"l\":{},\"ts\":{:.3}}}",
             self.ac,
             self.lat,
             self.lon,
@@ -106,6 +108,7 @@ impl State {
             self.flaps,
             self.thr,
             self.crashed as u8,
+            self.laser as u8,
             self.t
         )
     }
@@ -131,6 +134,7 @@ impl State {
             flaps: num("f").unwrap_or(0.0).clamp(0.0, 1.0) as f32,
             thr: num("h").unwrap_or(0.0).clamp(0.0, 1.0) as f32,
             crashed: num("c").unwrap_or(0.0) > 0.5,
+            laser: num("l").unwrap_or(0.0) > 0.5,
             t: num("ts")?,
         })
     }
@@ -234,6 +238,8 @@ pub struct Peer {
     /// vehicle: index into `aircraft::ALL`, or `boat_id()` for the speedboat
     pub ac: usize,
     pub crashed: bool,
+    /// firing their lasers
+    pub laser: bool,
     snaps: Vec<Snap>,
     /// their clock minus ours (s), lowest seen (least delayed report), drifting up slowly
     offset: Option<f64>,
@@ -249,7 +255,7 @@ pub struct Peer {
 
 impl Peer {
     fn new(id: u32) -> Self {
-        Peer { id, name: String::new(), ac: 0, crashed: false, snaps: Vec::new(), offset: None, seen: Instant::now(), pos: DVec3::ZERO, rot: DQuat::IDENTITY, vel: DVec3::ZERO, gear: 1.0, wake: VecDeque::new() }
+        Peer { id, name: String::new(), ac: 0, crashed: false, laser: false, snaps: Vec::new(), offset: None, seen: Instant::now(), pos: DVec3::ZERO, rot: DQuat::IDENTITY, vel: DVec3::ZERO, gear: 1.0, wake: VecDeque::new() }
     }
 
     pub fn is_boat(&self) -> bool {
@@ -283,6 +289,7 @@ impl Peer {
         }
         self.ac = s.ac as usize;
         self.crashed = s.crashed;
+        self.laser = s.laser;
         let o = now - s.t;
         self.offset = Some(match self.offset {
             Some(prev) if o >= prev => prev + (o - prev) * 0.02,
@@ -846,7 +853,7 @@ mod tests {
     use super::*;
 
     fn state() -> State {
-        State { name: "Sam \"Ace\" ✈".into(), ac: 3, lat: 37.6189354, lon: -122.3749812, alt: 1523.37, q: [0.1, -0.2, 0.3, 0.9273618], vel: [120.5, -3.25, 7.0], gear: 0.0, flaps: 0.33, thr: 0.8, crashed: false, t: 1234.567 }
+        State { name: "Sam \"Ace\" ✈".into(), ac: 3, lat: 37.6189354, lon: -122.3749812, alt: 1523.37, q: [0.1, -0.2, 0.3, 0.9273618], vel: [120.5, -3.25, 7.0], gear: 0.0, flaps: 0.33, thr: 0.8, crashed: false, laser: true, t: 1234.567 }
     }
 
     #[test]
@@ -856,7 +863,7 @@ mod tests {
         assert!(text.len() < 300, "{text}");
         let j: serde_json::Value = serde_json::from_str(&text).unwrap();
         let d = State::decode(&j).unwrap();
-        assert_eq!((d.name.as_str(), d.ac, d.crashed), (s.name.as_str(), s.ac, s.crashed));
+        assert_eq!((d.name.as_str(), d.ac, d.crashed, d.laser), (s.name.as_str(), s.ac, s.crashed, s.laser));
         assert!((d.lat - s.lat).abs() < 1e-7 && (d.lon - s.lon).abs() < 1e-7 && (d.alt - s.alt).abs() < 0.01);
         for k in 0..4 {
             assert!((d.q[k] - s.q[k]).abs() < 1e-5);

@@ -335,6 +335,19 @@ pub const CONTROLS: &[(&str, &[(&str, &str)])] = &[
         ("F11", "fullscreen on / off"),
         ("F1", "quick key reference"),
     ]),
+    ("DESTRUCTION MODE", &[
+        ("Left mouse / Enter", "fire the lasers"),
+        ("1", "wrecking ball on / off"),
+        ("2", "meteor shower: off, light, heavy, storm"),
+        ("R", "fly again now (else after 3 s)"),
+    ]),
+    ("MOUSE STEERING", &[
+        ("3", "mouse: look around / steer"),
+        ("Mouse", "aim: the aircraft follows the circle"),
+        ("Right mouse (hold)", "look around while steering"),
+        ("Keys / stick", "override the mouse while held"),
+        ("Esc", "frees the mouse (pause menu)"),
+    ]),
     ("GAMEPAD (MSFS 2020 layout)", &[
         ("Left stick", "pitch and roll"),
         ("LT / RT", "rudder left / right"),

@@ -998,6 +998,16 @@ impl Plane {
         d.wing[0] < short || d.wing[1] < short || d.fold.iter().any(|f| f.on) || d.tail.is_some() || d.hull > 0.6 || self.sink > 0.3 || (self.on_hull && self.up().dot(self.pos.normalize()) < 0.2)
     }
 
+    /// Blown apart in the air (Destruction mode: a meteor): a wing snapped
+    /// off near its root, the engine wrecked. It falls from there, as any
+    /// broken aircraft does, until it hits the ground.
+    pub fn blast(&mut self, why: &str) {
+        let side = (self.rng.f() < 0.5) as usize;
+        let at = self.dmg.wing[side] * 0.35;
+        self.snap_wing(side, at, 1.0, 0.0, true, why);
+        self.engine_hit(1.0, why);
+    }
+
     /// Advance one physics step. Returns an impact if the aircraft was destroyed.
     pub fn step(&mut self, dt: f64, c: &Controls, world: &World) -> Option<Impact> {
         let spec = self.spec;

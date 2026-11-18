@@ -1268,6 +1268,33 @@ impl Destruction {
         self.trim();
     }
 
+    /// Loose pieces knocked off something (a laser or a wrecking ball taking
+    /// a bite out of a wall, a meteor shot to bits): `n` of them about `size`
+    /// metres across, thrown out along `out` (plus `vel`), broken concrete
+    /// of colour `col` or (`rock`) lumps of rock.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fling(&mut self, at: DVec3, out: DVec3, vel: DVec3, n: u32, size: f32, col: [f32; 3], rock: bool, emit: &mut Vec<(DVec3, Particle)>) {
+        let o = out.normalize_or_zero().as_vec3();
+        for k in 0..n {
+            let d = (o * 1.3 + self.rng.dir()).normalize_or_zero();
+            let s = self.rng.range(0.35, 1.0) * size;
+            let half = if rock { Vec3::splat(s) } else { Vec3::new(s, s * self.rng.range(0.35, 0.7), s * self.rng.range(0.6, 1.0)) };
+            let tone = self.rng.range(0.7, 1.1);
+            let mesh = if rock { M_ROCK + k % 3 } else { M_SLAB + (self.rng.f() * N_SLAB as f32) as u32 % N_SLAB };
+            let rot = DQuat::from_axis_angle(self.rng.dir().as_dvec3(), self.rng.range(0.0, 6.0) as f64);
+            let v = (d * self.rng.range(3.0, 14.0)).as_dvec3() + vel;
+            let spin = self.rng.dir().as_dvec3() * self.rng.range(2.0, 10.0) as f64;
+            let c = Chunk::loose(at + out.normalize_or_zero() * 0.4, half, rot, v, spin, [col[0] * tone, col[1] * tone, col[2] * tone], mesh);
+            self.chunks.push(c);
+        }
+        // A puff of the same dust.
+        if rock || self.rng.f() < 0.3 {
+            let d = (o + self.rng.dir() * 0.8).normalize_or_zero();
+            emit.push((at, Particle { vel: (d * self.rng.range(2.0, 6.0)).into(), life: self.rng.range(1.5, 3.0), size0: self.rng.range(0.3, 0.7), size1: self.rng.range(1.5, 3.5), kind: if rock { DUST } else { GRIT }, drag: 1.4, buoy: 0.2, seed: self.rng.f(), alpha: self.rng.range(0.2, 0.35), ..Default::default() }));
+        }
+        self.trim();
+    }
+
     /// Keep the piece count bounded: small fragments at rest go first, then
     /// the oldest slabs at rest. Standing pieces are never dropped.
     fn trim(&mut self) {

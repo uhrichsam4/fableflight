@@ -11,6 +11,7 @@ mod cockpit;
 mod cars;
 mod crash;
 mod damage;
+mod destroy;
 mod destruct;
 mod fetch;
 mod fluid;
@@ -196,6 +197,13 @@ impl Loaded {
 }
 
 /// A graphics preset's name, in the interface language.
+fn mode_name(m: destroy::GameMode) -> &'static str {
+    match m {
+        destroy::GameMode::Free => t!("Free flight", "Vol libre"),
+        destroy::GameMode::Destruction => "Destruction",
+    }
+}
+
 fn preset_name(p: settings::Preset) -> &'static str {
     match p {
         settings::Preset::Low => t!("Low", "Faible"),
@@ -308,6 +316,19 @@ struct Args {
     mp_name: Option<String>,
     /// --mp-create: make a new room (a random code) and join it at once
     mp_create: bool,
+    /// --mode free|destruction: the game mode for this run
+    game_mode: Option<destroy::GameMode>,
+    /// Destruction mode, scripted: fire the lasers from SEC (for DUR s),
+    /// the meteor shower's rate, a meteor at SEC onto a spot DIST m ahead,
+    /// the wrecking ball hung from the start
+    fire_at: Option<(f64, f64)>,
+    meteors: Option<u8>,
+    meteor_at: Vec<(f64, f64)>,
+    wrecking_ball: bool,
+    /// --mouse-steer / --mouse-look for this run; --aim YAW,PITCH: the mouse
+    /// aim set off the nose (degrees), for scripted shots
+    mouse_steer: Option<bool>,
+    aim: Option<(f64, f64)>,
 }
 
 fn parse_args() -> Args {
@@ -366,6 +387,13 @@ fn parse_args() -> Args {
         mp_join: None,
         mp_name: None,
         mp_create: false,
+        game_mode: None,
+        fire_at: None,
+        meteors: None,
+        meteor_at: Vec::new(),
+        wrecking_ball: false,
+        mouse_steer: None,
+        aim: None,
         route: None,
         sim_speed: 1,
         airport: None,
@@ -507,6 +535,43 @@ fn parse_args() -> Args {
                 a.mp_create = true;
                 used = 1;
             }
+            "--mode" => {
+                a.game_mode = v.get(i + 1).and_then(|s| destroy::GameMode::parse(s));
+                if a.game_mode.is_none() {
+                    eprintln!("--mode takes free or destruction");
+                }
+            }
+            "--fire-at" => {
+                let p: Vec<f64> = v.get(i + 1).map(|s| s.split(',').filter_map(|x| x.parse().ok()).collect()).unwrap_or_default();
+                if let Some(&t) = p.first() {
+                    a.fire_at = Some((t, p.get(1).copied().unwrap_or(1e9)));
+                }
+            }
+            "--meteors" => a.meteors = num(&v, i).map(|r| r.clamp(0.0, 3.0) as u8),
+            "--meteor-at" => {
+                let p: Vec<f64> = v.get(i + 1).map(|s| s.split(',').filter_map(|x| x.parse().ok()).collect()).unwrap_or_default();
+                if let Some(&t) = p.first() {
+                    a.meteor_at.push((t, p.get(1).copied().unwrap_or(700.0)));
+                }
+            }
+            "--wrecking-ball" => {
+                a.wrecking_ball = true;
+                used = 1;
+            }
+            "--mouse-steer" => {
+                a.mouse_steer = Some(true);
+                used = 1;
+            }
+            "--mouse-look" => {
+                a.mouse_steer = Some(false);
+                used = 1;
+            }
+            "--aim" => {
+                let p: Vec<f64> = v.get(i + 1).map(|s| s.split(',').filter_map(|x| x.parse().ok()).collect()).unwrap_or_default();
+                if p.len() == 2 {
+                    a.aim = Some((p[0], p[1]));
+                }
+            }
             "--map-pick" => a.map_pick = v.get(i + 1).map(|s| s.split(',').map(|c| c.trim().to_string()).collect()).unwrap_or_default(),
             "--pause-menu" => {
                 // page[@seconds]: open the flight panel (Tab) or the pause menu (Esc) on that page, for scripted screenshots
@@ -621,7 +686,7 @@ fn parse_args() -> Args {
                 used = 1;
             }
             "--help" | "-h" => {
-                println!("Samiam's Flight Sim\nfablegame [--menu | --no-menu] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--waves M] [--swell M,FROM_DEG] [--storm 0..1] [--snow 0..1] [--cloud-base M] [--weather] [--pause-menu flight|places|weather|game|route|settings|graphics|controls|multiplayer[@SECONDS]] [--map-open SECONDS [--map-pick KSFO,KOAK]] [--mp-server ws(s)://HOST] [--mp-join CODE | --mp-create] [--mp-name NAME] [--airport CODE [--runway 28L] [--approach]] [--ship carrier|megacarrier|titanic|megaship [--approach]] [--route KSFO,KOAK,...] [--sim-speed 1|2|4|8] [--max-zoom 8..19] [--cockpit] [--fov DEG] [--no-vsync] [--no-taa] [--render-scale 0.5..1] [--graphics low|medium|high|ultra[,scale=0.5..1,clouds=0..2,shadows=0..3,ao=0|1,bloom=0|1,terrain=0..3,water=low|high,msaa=0|1,dyn=0|1,target=FPS,upscaler=taau|fsr]] [--gpu-profile] [--fullscreen] [--mute] [--lang en|fr] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--boost-at SECONDS] [--damage rwing=4.3,laileron=0,rudder=0.5,prop=0.5,engine=0.4,oil=0.6,crack=1,nosegear=0,lsnap=3.4,rfold=3.2,tail=2.0]");
+                println!("Samiam's Flight Sim\nfablegame [--menu | --no-menu] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--waves M] [--swell M,FROM_DEG] [--storm 0..1] [--snow 0..1] [--cloud-base M] [--weather] [--pause-menu flight|places|weather|game|route|settings|graphics|controls|multiplayer[@SECONDS]] [--map-open SECONDS [--map-pick KSFO,KOAK]] [--mp-server ws(s)://HOST] [--mp-join CODE | --mp-create] [--mp-name NAME] [--mode free|destruction] [--fire-at SEC[,DUR]] [--meteors 0..3] [--meteor-at SEC[,DIST]] [--wrecking-ball] [--mouse-steer | --mouse-look] [--aim YAW,PITCH] [--airport CODE [--runway 28L] [--approach]] [--ship carrier|megacarrier|titanic|megaship [--approach]] [--route KSFO,KOAK,...] [--sim-speed 1|2|4|8] [--max-zoom 8..19] [--cockpit] [--fov DEG] [--no-vsync] [--no-taa] [--render-scale 0.5..1] [--graphics low|medium|high|ultra[,scale=0.5..1,clouds=0..2,shadows=0..3,ao=0|1,bloom=0|1,terrain=0..3,water=low|high,msaa=0|1,dyn=0|1,target=FPS,upscaler=taau|fsr]] [--gpu-profile] [--fullscreen] [--mute] [--lang en|fr] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--boost-at SECONDS] [--damage rwing=4.3,laileron=0,rudder=0.5,prop=0.5,engine=0.4,oil=0.6,crack=1,nosegear=0,lsnap=3.4,rfold=3.2,tail=2.0]");
                 std::process::exit(0);
             }
             other => {
@@ -912,6 +977,27 @@ struct Game {
     /// false when the cascades hold nothing usable
     casc_keep: [([[f32; 4]; 4], DVec3); 3],
     casc_ok: bool,
+    /// Destruction mode (destroy.rs): lasers, meteors, the wrecking ball,
+    /// the death count; and the game mode itself
+    destroy: destroy::Destroy,
+    /// mouse steering: on, off, or as the mode has it (None); its speed; the
+    /// direction aimed at (planet frame); looking round with the right button held
+    mouse_steer: Option<bool>,
+    steer_sens: f64,
+    aim: DVec3,
+    free_look: bool,
+    /// the left button held for the lasers, the window focused, the mouse
+    /// pointer held in the window (and whether the system would)
+    fire_mouse: bool,
+    focused: bool,
+    grabbed: bool,
+    grab_ok: bool,
+    /// scripted (Destruction mode): fire from, until; meteors at, onto a spot
+    /// that far ahead; the ball at the start; the aim off the nose
+    fire_at: Option<(f64, f64)>,
+    meteor_at: Vec<(f64, f64)>,
+    ball_start: bool,
+    aim_start: Option<(f64, f64)>,
 }
 
 impl Game {
@@ -997,6 +1083,8 @@ impl Game {
         solids.extend(boat::meshes());
         debug_assert_eq!(solids.len() as u32, ships::MESH);
         solids.extend(ships::meshes());
+        let destroy_mesh = solids.len() as u32;
+        solids.extend(destroy::meshes());
         r.set_inst_meshes(&solids);
         let mut menu = menu::Menu::new(lat, lon, args.hour);
         menu.aircraft = aircraft::ALL.iter().position(|s| std::ptr::eq(*s, spec)).unwrap_or(0);
@@ -1056,6 +1144,7 @@ impl Game {
         // everything within the aircraft's bounds, and a little around them
         // for the gear, flaps and control surfaces as they move.
         let (cy, cp, cd) = args.cam.unwrap_or((0.0, 0.2, spec.cam_dist));
+        let aim0 = plane.forward();
         let mut g = Self {
             gkey: src.google.key(), gkey_show: false, gm_logo: None, stills: vec![None; aircraft::ALL.len() + 1], map: minimap::Map::new(src.clone(), prefs.minimap), window, r, world, src, spec, model, piece_mesh, group_mesh, piece_cut, group_pivots, hangar: Vec::new(), building: Vec::new(), crashed: false, crash: None, crash_real: 0.0, egui_ctx, egui_state, keys: HashSet::new(), drag: false, last_cursor: None,
             cam_yaw: cy.to_radians(), cam_pitch: cp, cam_dist: cd, cam_mode: if args.cockpit { 1 } else { prefs.cam_mode }, cam_pos, cam_dir: -plane.forward(), cam_look: plane.pos, orbit: 0.0, cam_rise: 0.0, cam_clear_t: 0.0, cam_ang: None, cam_hold: 0.0,
@@ -1082,6 +1171,25 @@ impl Game {
             mp_server: args.mp_server.clone().unwrap_or_else(|| prefs.mp_server.clone()),
             mp_code: args.mp_join.clone().unwrap_or_default(),
             mp_open: false,
+            destroy: {
+                let mut d = destroy::Destroy::new(secs.to_bits() ^ 0xde57);
+                d.mode = args.game_mode.unwrap_or(prefs.mode);
+                d.meteor_rate = args.meteors.unwrap_or(if d.mode == destroy::GameMode::Destruction { 1 } else { 0 });
+                d.mesh0 = destroy_mesh;
+                d
+            },
+            mouse_steer: args.mouse_steer.or(prefs.mouse_steer),
+            steer_sens: prefs.steer_sens,
+            aim: aim0,
+            free_look: false,
+            fire_mouse: false,
+            focused: true,
+            grabbed: false,
+            grab_ok: true,
+            fire_at: args.fire_at,
+            meteor_at: args.meteor_at.clone(),
+            ball_start: args.wrecking_ball,
+            aim_start: args.aim,
             livewx: livewx::LiveWx::new(),
             prefs: prefs.clone(),
             // --route alone starts on the runway at its departure.
@@ -1651,6 +1759,13 @@ impl Game {
         self.warn_t = [-10.0; 4];
         (self.g_slow, self.was_ground, self.prev_vs, self.prev_gear, self.prev_flaps) = (1.0, false, 0.0, self.plane.gear, self.plane.flaps);
         self.gauges = gauges::Gauges::new(&self.plane, self.frame ^ 0x9e37);
+        // A new life: the aim straight ahead, the ball back on its chain.
+        self.destroy.tally.revived();
+        self.aim = self.plane.forward();
+        self.destroy.ball = None;
+        if self.destroy.ball_on && self.destroying() {
+            self.hang_ball(true);
+        }
     }
 
     /// On the ground, at rest, waiting for the terrain under it to load.
@@ -1666,6 +1781,325 @@ impl Game {
         self.prev_cam = self.cam_pos;
         (self.prev_gear, self.prev_flaps, self.was_ground) = (1.0, 0.0, true);
         self.hold_spot = Some((lat, lon, self.real + 30.0));
+    }
+
+    // ---- Destruction mode and mouse steering (destroy.rs)
+
+    /// The mouse steers the aircraft (mouse aim) rather than looking around.
+    fn steering(&self) -> bool {
+        self.mode == Mode::Fly && !self.boat_mode && self.mouse_steer.unwrap_or(self.destroy.on())
+    }
+
+    /// Destruction mode's weapons and hazards are in play (an aircraft, not the boat).
+    fn destroying(&self) -> bool {
+        self.destroy.on() && !self.boat_mode && self.mode == Mode::Fly
+    }
+
+    /// Hold the pointer in the window, hidden, while the mouse steers; let it
+    /// go for the menus and panels. Where the system will not hold it, it is
+    /// put back in the middle of the window each frame instead.
+    fn update_grab(&mut self) {
+        let want = self.steering() && self.focused && !self.pause_open && !self.info_open && !self.map.open && !self.goto_open && !self.show_help && !self.wx.open && !self.r.headless;
+        if want != self.grabbed {
+            use winit::window::CursorGrabMode;
+            if want {
+                self.grab_ok = self.window.set_cursor_grab(CursorGrabMode::Locked).or_else(|_| self.window.set_cursor_grab(CursorGrabMode::Confined)).is_ok();
+                if !self.grab_ok {
+                    log::warn!("mouse steering: the system would not hold the pointer; it is put back in the middle each frame");
+                }
+            } else {
+                let _ = self.window.set_cursor_grab(CursorGrabMode::None);
+                self.free_look = false;
+                self.fire_mouse = false;
+            }
+            self.window.set_cursor_visible(!want);
+            self.grabbed = want;
+        }
+        if self.grabbed && !self.grab_ok {
+            let s = self.window.inner_size();
+            let _ = self.window.set_cursor_position(winit::dpi::PhysicalPosition::new(s.width as f64 / 2.0, s.height as f64 / 2.0));
+        }
+    }
+
+    /// The mouse moved (raw counts, while it is held): the aim, or with the
+    /// right button held the camera.
+    fn mouse_moved(&mut self, dx: f64, dy: f64) {
+        if !self.grabbed {
+            return;
+        }
+        if self.free_look {
+            let k = self.look_sens * if self.cam_mode == 1 { self.head.zoom } else { 1.0 };
+            self.cam_yaw -= dx * 0.005 * k;
+            self.cam_pitch = (self.cam_pitch + dy * 0.004 * k).clamp(-1.2, 1.4);
+        } else {
+            self.aim = destroy::turn_aim(self.aim, self.plane.pos.normalize(), dx, dy, self.steer_sens);
+        }
+    }
+
+    /// The trigger: the left button, Enter, or a scripted burst.
+    fn trigger(&self) -> bool {
+        self.fire_mouse || self.keys.contains(&KeyCode::Enter) || self.keys.contains(&KeyCode::NumpadEnter) || self.fire_at.is_some_and(|(t, d)| self.real >= t && self.real < t + d)
+    }
+
+    /// The lasers' muzzles, at the wing roots (`Spec::span` is the half span).
+    fn muzzles(&self) -> [DVec3; 2] {
+        let s = self.spec.span as f64;
+        let p = &self.plane;
+        [-1.0, 1.0].map(|k| p.pos + p.rot * DVec3::new(k * 0.25 * s, -0.04 * s, -0.12 * s))
+    }
+
+    /// Where the wrecking ball's chain is fastened, under the belly.
+    fn ball_top(&self) -> DVec3 {
+        self.plane.pos + self.plane.rot * DVec3::new(0.0, -0.1 * self.spec.span as f64 - 0.4, 0.0)
+    }
+
+    fn hang_ball(&mut self, on: bool) {
+        let top = self.ball_top();
+        self.destroy.set_ball(on, top, self.plane.vel, self.spec.span as f64, self.spec.mass);
+    }
+
+    /// Killed (a meteor): blown apart in the air, to fall from there.
+    fn kill(&mut self, why: &'static str) {
+        if self.crashed || self.mode != Mode::Fly || !self.destroy.tally.died(self.real) {
+            return;
+        }
+        self.plane.blast(why);
+        self.destroy.ball = None;
+        self.destroy.ball_force = DVec3::ZERO;
+        self.sim_speed = 1;
+    }
+
+    /// Back in the air after a death, a few seconds before where it happened.
+    fn respawn_after_death(&mut self) {
+        let died = self.destroy.tally.dead_at.unwrap_or(self.real);
+        match self.destroy.respawn_spot(died) {
+            Some((la, lo, al, hd, sp)) => {
+                // (turned round if what it flew into is still right ahead)
+                let p = geo::lla_to_pos(la, lo, al);
+                let (e, n, _) = geo::enu(p);
+                let ahead = e * hd.sin() + n * hd.cos();
+                let blocked = self.world.ray_building(p, ahead, 700.0).is_some() || self.destroy.trace(&self.world, p, ahead, 700.0).1.is_some();
+                let hd = if blocked { hd + std::f64::consts::PI } else { hd };
+                self.respawn_at(la, lo, al, hd, sp.max(self.spec.cruise * 0.85));
+            }
+            None => {
+                let (la, lo, _) = geo::pos_to_lla(self.plane.pos);
+                let g = self.world.ground(la, lo).map(|g| g.h).unwrap_or(0.0);
+                let f = self.plane.forward();
+                let (e, n, _) = geo::enu(self.plane.pos);
+                self.respawn(la, lo, g + 420.0, f.dot(e).atan2(f.dot(n)));
+            }
+        }
+    }
+
+    /// A dent where a laser hits open ground (grown into one already there),
+    /// or a crater.
+    fn dent(&mut self, at: DVec3, r: f32, small: bool) {
+        if small {
+            if let Some(c) = self.world.craters.iter_mut().find(|c| (c.0 - at).length() < (c.1 + 3.0) as f64) {
+                c.1 = (c.1 + 0.1).min(4.5).max(c.1);
+                return;
+            }
+            // (the few craters there can be are kept for the big ones)
+            if self.world.craters.len() >= 6 {
+                return;
+            }
+        }
+        self.world.add_crater(at, r);
+    }
+
+    /// A meteor comes down: a crater (or the building it hit) and everything close by.
+    fn meteor_blast(&mut self, at: DVec3, vel: DVec3, r: f32, building: Option<(geo::TileId, usize)>, water: bool, femit: &mut Vec<(DVec3, render::Particle)>) {
+        let mut gone = 0.0;
+        if let Some((tile, idx)) = building {
+            if self.world.footprint(tile, idx).is_some() {
+                self.destroy.tally.destroyed += 1;
+            }
+            self.bring_down(tile, idx, at, vel * 0.5, None, femit);
+        } else if water {
+            let up = at.normalize().as_vec3();
+            for _ in 0..80 {
+                let r = &mut self.rng;
+                let d = (up * 2.0 + r.dir()).normalize();
+                femit.push((at, render::Particle { vel: (d * r.range(8.0, 40.0)).into(), life: r.range(1.5, 3.5), size0: r.range(0.4, 0.9), size1: r.range(1.5, 3.5), kind: crash::DROPS, drag: 0.3, seed: r.f(), alpha: r.range(0.4, 0.7), ..Default::default() }));
+            }
+            if let Some(a) = &self.audio {
+                a.event(audio::Event::Splash(1.5));
+            }
+        } else {
+            self.world.add_crater(at, r);
+            self.destr.eject(at, r, vel, femit);
+            gone = r as f64;
+        }
+        for (t, i) in self.world.buildings_near(at, r as f64 * 1.8 + 10.0, 3000.0) {
+            if self.world.footprint(t, i).is_some() {
+                self.destroy.tally.destroyed += 1;
+            }
+            self.bring_down(t, i, at, vel * 0.2, None, femit);
+        }
+        if !water {
+            self.destr.blast_trees(&mut self.world, &self.r.queue, at, r as f64 * 3.0 + 15.0, gone, femit);
+        }
+    }
+
+    /// One frame of Destruction mode: scripted events, the lasers, meteors,
+    /// the ball's chain, what they hit, the respawn.
+    fn destroy_frame(&mut self, dt: f64, femit: &mut Vec<(DVec3, render::Particle)>) {
+        let on = self.destroying();
+        let alive = !self.crashed && self.destroy.tally.dead_at.is_none();
+        if on {
+            self.anchor_fx(self.plane.pos);
+        }
+        if on && alive {
+            let (la, lo, h) = geo::pos_to_lla(self.plane.pos);
+            let agl = h - self.world.ground(la, lo).map(|g| g.h).unwrap_or(0.0);
+            if !self.plane.on_ground && !self.plane.wrecked() {
+                self.destroy.note_good(self.real, self.plane.pos, self.plane.forward(), self.plane.airspeed().length(), agl);
+            }
+            // Scripted: the ball from the start, the aim off the nose, meteors onto a spot ahead.
+            if std::mem::take(&mut self.ball_start) {
+                self.hang_ball(true);
+            }
+            let k = self.meteor_at.iter().position(|m| self.real >= m.0);
+            if let Some(k) = k {
+                let (_, dist) = self.meteor_at.remove(k);
+                let up = self.plane.pos.normalize();
+                let f = self.plane.forward();
+                let flat = (f - up * f.dot(up)).normalize_or(f);
+                let (la, lo, _) = geo::pos_to_lla(self.plane.pos + flat * dist);
+                let g = self.world.ground(la, lo).map(|g| g.h).unwrap_or(0.0);
+                let craft = destroy::Craft { pos: self.plane.pos, vel: self.plane.vel, fwd: f, radius: 0.0, alive: true };
+                self.destroy.spawn_meteor(&self.world, &craft, Some(geo::lla_to_pos(la, lo, g)));
+            }
+        }
+        if let Some((y, p)) = self.aim_start.filter(|_| self.mode == Mode::Fly) {
+            let up = self.plane.pos.normalize();
+            let f = self.plane.forward();
+            let flat = (f - up * f.dot(up)).normalize_or(f);
+            let d = DQuat::from_axis_angle(up, -y.to_radians()) * flat;
+            self.aim = (d * p.to_radians().cos() + up * p.to_radians().sin()).normalize();
+            if self.real > 0.5 {
+                self.aim_start = None;
+            }
+        }
+        self.destroy.firing = on && alive && !self.pause_open && self.trigger();
+        if self.destroy.firing {
+            let aim = self.steering().then_some(self.aim);
+            let m = self.muzzles();
+            self.destroy.fire(&self.world, m, self.plane.pos, self.plane.forward(), aim, femit);
+        }
+        let craft = destroy::Craft { pos: self.plane.pos, vel: self.plane.vel, fwd: self.plane.forward(), radius: self.spec.span as f64 * 0.9, alive: on && alive };
+        self.destroy.update(dt, &self.world, &craft, femit);
+        self.destroy.chain_frame(dt);
+        let reqs: Vec<_> = self.destroy.reqs.drain(..).collect();
+        let lin = |c: u8| (c as f32 / 255.0).powf(2.2);
+        for q in reqs {
+            match q {
+                destroy::Req::Chip { tile, idx, at, out, hard } => {
+                    let col = self.world.building_col(tile, idx).map(|c| c.map(lin)).unwrap_or([0.45, 0.43, 0.4]);
+                    self.destr.fling(at, out, DVec3::ZERO, (2.0 + hard * 3.0) as u32, 0.35 + 0.15 * hard.min(3.0), col, false, femit);
+                }
+                destroy::Req::BringDown { tile, idx, at, vel } => {
+                    if self.world.footprint(tile, idx).is_some() {
+                        self.destroy.tally.destroyed += 1;
+                    }
+                    self.bring_down(tile, idx, at, vel, None, femit);
+                    self.destr.booms.push(0.7);
+                }
+                destroy::Req::Crater { at, r, small } => self.dent(at, r, small),
+                destroy::Req::Rocks { at, vel, r } => self.destr.fling(at, vel.normalize_or_zero(), vel, (5.0 + r * 1.5) as u32, (r * 0.22).clamp(0.3, 1.2), [0.16, 0.13, 0.11], true, femit),
+                destroy::Req::Blast { at, vel, r, building, water } => self.meteor_blast(at, vel, r, building, water, femit),
+                destroy::Req::Kill(why) => self.kill(why),
+                destroy::Req::Sound(e) => {
+                    if let Some(a) = &self.audio {
+                        a.event(e);
+                    }
+                }
+                destroy::Req::Boom(p, at) => {
+                    if let Some(a) = &self.audio {
+                        let near = 1.0 / (1.0 + ((self.cam_pos - at).length() as f32 / 400.0).powi(2));
+                        a.boom(p * (0.25 + 0.75 * near));
+                    }
+                }
+            }
+        }
+        // Back in the air a few seconds after a death.
+        if on && self.destroy.tally.dead_at.is_some_and(|t| self.real - t > destroy::RESPAWN_AFTER) {
+            self.respawn_after_death();
+        }
+    }
+
+    /// With mouse steering (and in Destruction mode), the aim circle and the
+    /// cross where the nose points.
+    fn aim_marks(&self, ctx: &egui::Context) {
+        use egui::{Color32, Pos2, Stroke};
+        let screen = ctx.content_rect();
+        let alive = !self.crashed && self.destroy.tally.dead_at.is_none();
+        if let Some((vp, cam)) = self.live_view.filter(|_| alive && (self.steering() || self.destroying())) {
+            let project = |p: DVec3| -> Option<Pos2> {
+                let c = vp * (p - cam).as_vec3().extend(1.0);
+                if c.w <= 1e-3 {
+                    return None;
+                }
+                let n = c.truncate() / c.w;
+                Some(Pos2::new(screen.left() + (n.x * 0.5 + 0.5) * screen.width(), screen.top() + (0.5 - n.y * 0.5) * screen.height()))
+            };
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::unique("mouse_aim")));
+            if let Some(p) = project(self.plane.pos + self.plane.forward() * 1500.0) {
+                let col = Color32::from_rgb(120, 255, 140);
+                let sh = Stroke::new(3.5, Color32::from_black_alpha(110));
+                for (a, b) in [((-15.0, 0.0), (-5.0, 0.0)), ((5.0, 0.0), (15.0, 0.0)), ((0.0, -15.0), (0.0, -5.0)), ((0.0, 5.0), (0.0, 15.0))] {
+                    let seg = [p + egui::vec2(a.0, a.1), p + egui::vec2(b.0, b.1)];
+                    painter.line_segment(seg, sh);
+                    painter.line_segment(seg, Stroke::new(2.0, col));
+                }
+                painter.circle_filled(p, 2.0, col);
+            }
+            if self.steering() && !self.free_look {
+                if let Some(p) = project(self.plane.pos + self.aim * 1500.0) {
+                    painter.circle_stroke(p, 17.0, Stroke::new(3.5, Color32::from_black_alpha(110)));
+                    painter.circle_stroke(p, 17.0, Stroke::new(2.0, Color32::from_rgba_unmultiplied(255, 255, 255, 230)));
+                }
+            }
+        }
+    }
+
+    /// Destruction mode's panel, right of the HUD's: the death count, what
+    /// has been destroyed, the meteors and ball, the respawn.
+    fn destroy_panel(&self, ctx: &egui::Context, x: f32) -> egui::Rect {
+        use egui::{Align2, Color32, FontId, RichText};
+        let tl = &self.destroy.tally;
+        egui::Area::new(egui::Id::unique("deaths")).anchor(Align2::LEFT_TOP, [x, 14.0]).show(ctx, |ui| {
+            egui::Frame::new().fill(Color32::from_rgba_unmultiplied(8, 12, 18, 140)).corner_radius(6.0).inner_margin(egui::Margin::symmetric(16, 8)).show(ui, |ui| {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(t!("DEATHS: {}", "MORTS : {}", tl.deaths)).font(FontId::monospace(26.0)).strong().color(Color32::from_rgb(255, 92, 64)));
+                    ui.label(RichText::new(t!("Buildings destroyed: {}", "Bâtiments détruits : {}", tl.destroyed)).font(FontId::monospace(14.0)).color(Color32::from_rgba_unmultiplied(255, 255, 255, 235)));
+                    let ball = if self.destroy.ball_on { t!("   Wrecking ball", "   Boulet") } else { "" };
+                    ui.label(RichText::new(t!("Meteors: {}{}", "Météores : {}{}", destroy::Destroy::rate_name(self.destroy.meteor_rate), ball)).font(FontId::monospace(12.0)).color(Color32::from_rgba_unmultiplied(255, 255, 255, 150)));
+                    if let Some(t) = tl.dead_at {
+                        let left = (destroy::RESPAWN_AFTER - (self.real - t)).max(0.0);
+                        ui.label(RichText::new(t!("Flying again in {:.1} s  ·  R now", "Retour en vol dans {:.1} s  ·  R tout de suite", left)).font(FontId::monospace(14.0)).color(Color32::from_rgb(255, 190, 60)));
+                    }
+                });
+            });
+        })
+        .response
+        .rect
+    }
+
+    /// Switch the game mode (start screen, pause menu).
+    fn set_game_mode(&mut self, m: destroy::GameMode) {
+        if m == self.destroy.mode {
+            return;
+        }
+        self.destroy.mode = m;
+        self.destroy.clear();
+        self.destroy.ball_on = false;
+        self.destroy.tally.dead_at = None;
+        if m == destroy::GameMode::Destruction && self.destroy.meteor_rate == 0 {
+            self.destroy.meteor_rate = 1;
+        }
+        self.aim = self.plane.forward();
     }
 
     /// Start at an airport: its layout is put together in the background
@@ -1756,6 +2190,24 @@ impl Game {
         };
         self.gamepad(dt, &mut c);
         c.brake |= self.parking_brake;
+        // Mouse steering: unless the keys or a stick are flying it, the
+        // instructor flies the nose onto the aim (destroy.rs `instructor`).
+        if self.steering() && !self.crashed && self.mode == Mode::Fly {
+            if c.pitch.abs() > 0.05 || c.roll.abs() > 0.05 {
+                // (flown by hand: the aim comes along, so letting go holds the new heading)
+                self.aim = self.plane.forward();
+            } else {
+                let room = 1.0 - smoothstep(0.72, 0.97, self.plane.g_load / self.spec.g_limit.max(1.0) as f64);
+                let (p, r, y) = destroy::instructor(self.plane.rot, self.plane.omega, self.plane.pos.normalize(), self.aim, self.plane.airspeed().length(), room);
+                c.pitch = p;
+                c.roll = r;
+                if c.yaw.abs() < 0.05 {
+                    c.yaw = y;
+                }
+            }
+        } else if !self.steering() {
+            self.aim = self.plane.forward();
+        }
         if let Some(t) = self.crash_at {
             if self.real > t && !self.crashed {
                 c.pitch = -1.0;
@@ -2104,6 +2556,27 @@ impl Game {
                 self.status_until = self.real + 3.0;
             }
             KeyCode::KeyH => self.show_hud = !self.show_hud,
+            // Destruction mode: the wrecking ball, the meteor shower; and the mouse's job.
+            KeyCode::Digit1 if self.destroying() => {
+                let on = !self.destroy.ball_on;
+                if !self.crashed && self.destroy.tally.dead_at.is_none() {
+                    self.hang_ball(on);
+                } else {
+                    self.destroy.ball_on = on;
+                }
+                self.status = if on { t!("Wrecking ball on", "Boulet de démolition accroché") } else { t!("Wrecking ball off", "Boulet de démolition largué") }.into();
+                self.status_until = self.real + 2.0;
+            }
+            KeyCode::Digit2 if self.destroying() => {
+                self.destroy.meteor_rate = (self.destroy.meteor_rate + 1) % 4;
+                self.status = t!("Meteor shower: {}", "Pluie de météores : {}", destroy::Destroy::rate_name(self.destroy.meteor_rate));
+                self.status_until = self.real + 2.0;
+            }
+            KeyCode::Digit3 if !self.boat_mode => {
+                self.mouse_steer = Some(!self.steering());
+                self.status = if self.steering() { t!("Mouse: steer (right button: look around)", "Souris : pilotage (bouton droit : regarder)") } else { t!("Mouse: look around", "Souris : regarder autour") }.into();
+                self.status_until = self.real + 2.5;
+            }
             KeyCode::KeyK if !self.crashed => {
                 self.gauges.sync_dg(&self.plane);
                 self.status = t!("Heading indicator set to the compass", "Conservateur de cap recalé sur le compas").into();
@@ -2146,6 +2619,7 @@ impl Game {
     /// Back to the globe, looking at where we were.
     fn to_globe(&mut self) {
         self.set_pause_menu(false);
+        self.destroy.clear();
         self.info_open = false;
         let (lat, lon, _) = geo::pos_to_lla(self.plane.pos);
         self.menu.look_at(lat.to_degrees(), lon.to_degrees(), 60_000.0);
@@ -2157,6 +2631,11 @@ impl Game {
 
     /// A fresh aircraft in the air over where we are (or where we crashed), on the same heading.
     fn respawn_here(&mut self) {
+        // Destruction mode, just killed: back where it was flying, now.
+        if self.destroying() && self.destroy.tally.dead_at.is_some() {
+            self.respawn_after_death();
+            return;
+        }
         // Started on a ship and still near it: back on its deck (or approach).
         if let (Some(_), Some(s)) = (self.ship_pick, self.fleet.flagship()) {
             if (s.pos - self.plane.pos).length() < 40_000.0 {
@@ -2274,6 +2753,9 @@ impl Game {
         if self.menu.starting {
             return;
         }
+        // A new session: the counts start again.
+        self.destroy.clear();
+        self.destroy.tally.new_session();
         self.set_vehicle(self.menu.aircraft);
         if let Some(k) = self.ship_pick {
             self.utc = (self.menu.hour - lon / 15.0).rem_euclid(24.0);
@@ -2296,7 +2778,9 @@ impl Game {
 
     /// Particles live in a frame anchored near the action; move it if the action has moved on.
     fn anchor_fx(&mut self, at: DVec3) {
-        let stale = self.crash.as_ref().map(|c| c.time > 90.0).unwrap_or(true);
+        // (in Destruction mode the action moves on fast: the old wreck is let go sooner)
+        let keep = if self.destroying() { 8.0 } else { 90.0 };
+        let stale = self.crash.as_ref().map(|c| c.time > keep).unwrap_or(true);
         if stale && (self.fx_anchor - at).length() > 800.0 {
             // Live particles are carried over into the new frame.
             self.fx_shift += self.fx_anchor - at;
@@ -2537,7 +3021,7 @@ impl Game {
 
     /// The settings worth keeping, as they are now.
     fn live_settings(&self) -> settings::Settings {
-        settings::Settings { lang: self.prefs_lang, sound_on: self.sound_on, volume: self.volume, cam_mode: self.cam_mode, cockpit_fov: self.cockpit_fov, look_sens: self.look_sens, show_hud: self.show_hud, minimap: self.map.mini_on, taa: self.taa, live_traffic: self.live.enabled(), live_weather: self.wx.live, real_time: self.wx.real_time, graphics: self.gfx_keep.map(|g| g.keep_run(&self.gfx0, &self.gfx_base)), mp_name: self.mp_name.clone(), mp_server: self.mp_server.clone() }
+        settings::Settings { lang: self.prefs_lang, sound_on: self.sound_on, volume: self.volume, cam_mode: self.cam_mode, cockpit_fov: self.cockpit_fov, look_sens: self.look_sens, show_hud: self.show_hud, minimap: self.map.mini_on, taa: self.taa, live_traffic: self.live.enabled(), live_weather: self.wx.live, real_time: self.wx.real_time, graphics: self.gfx_keep.map(|g| g.keep_run(&self.gfx0, &self.gfx_base)), mp_name: self.mp_name.clone(), mp_server: self.mp_server.clone(), mode: self.destroy.mode, mouse_steer: self.mouse_steer, steer_sens: self.steer_sens }
     }
 
     /// The multiplayer relay in use: the one set, else the game's own.
@@ -2835,6 +3319,7 @@ impl Game {
 
     fn frame(&mut self) {
         self.limit_rate();
+        self.update_grab();
         self.apply_graphics();
         self.keep_settings(false);
         let now = Instant::now();
@@ -3054,7 +3539,12 @@ impl Game {
                 self.world.decks = self.fleet.decks_near(self.plane.pos, 3000.0);
                 self.ship_carry();
                 self.plane.push = if self.plane.hold { DVec3::ZERO } else { self.ops.step(h, &self.plane, &self.world.decks, c.boost) };
+                self.plane.push += self.destroy.ball_force;
                 let imp = self.plane.step(h, &c, &self.world);
+                if self.destroy.ball.is_some() {
+                    let top = self.ball_top();
+                    self.destroy.ball_step(h, top, self.plane.vel, &self.world);
+                }
                 self.gauges.update(h, &self.plane, self.time);
                 steps += 1;
                 scrape_n += self.plane.sparks.len();
@@ -3127,7 +3617,15 @@ impl Game {
                     }
                 }
                 if let Some(mut imp) = imp {
-                    self.r.clear_particles();
+                    // (Destruction mode: the fires, smoke and meteor trails all around carry on)
+                    if !self.destroying() {
+                        self.r.clear_particles();
+                    }
+                    if self.destroying() {
+                        self.destroy.tally.died(self.real);
+                        self.destroy.ball = None;
+                        self.destroy.ball_force = DVec3::ZERO;
+                    }
                     let tears = self.wreck_meshes();
                     // A house is no match for an airliner: it goes through
                     // it and on, slowed about as much as the house weighs.
@@ -3205,6 +3703,9 @@ impl Game {
                 self.destr.booms.push(0.5);
             }
             self.sheds.update(dt as f32, &self.world);
+        }
+        if dt > 0.0 && !in_menu {
+            self.destroy_frame(dt, &mut femit);
         }
         let booms: Vec<f32> = self.destr.booms.drain(..).collect();
         if !booms.is_empty() {
@@ -3441,17 +3942,20 @@ impl Game {
             self.cam_pos = cam;
         } else {
             let u = self.plane.pos.normalize();
-            let back = -self.plane.forward();
-            self.cam_dir = (self.cam_dir + (back - self.cam_dir) * (dt_real * 3.5).min(1.0)).normalize();
+            // Mouse steering: the camera looks where the mouse aims (unless
+            // looking round with the right button, or a scripted shot's camera).
+            let steer_cam = self.steering() && !self.free_look && !self.crashed && !self.shots.first().is_some_and(|s| s.2.is_some());
+            let back = if steer_cam { -self.aim } else { -self.plane.forward() };
+            self.cam_dir = (self.cam_dir + (back - self.cam_dir) * (dt_real * if steer_cam { 6.0 } else { 3.5 }).min(1.0)).normalize();
             let flat = (self.cam_dir - u * self.cam_dir.dot(u)).normalize_or_zero();
-            let tilt = self.cam_dir.dot(u).asin() * 0.6 + self.cam_pitch;
-            let d = DQuat::from_axis_angle(u, self.cam_yaw) * (flat * tilt.cos() + u * tilt.sin());
+            let (yaw, tilt) = if steer_cam { (0.0, self.cam_dir.dot(u).asin() + 0.12) } else { (self.cam_yaw, self.cam_dir.dot(u).asin() * 0.6 + self.cam_pitch) };
+            let d = DQuat::from_axis_angle(u, yaw) * (flat * tilt.cos() + u * tilt.sin());
             let vibe = self.plane.dmg.vibe.min(2.0) as f64;
             // (Offsets scale with the aircraft: the camera sits as far back for its size.)
             let sz = self.spec.cam_dist / 16.0;
             cam = self.plane.pos + d * self.cam_dist + u * (1.5 * sz) + (self.plane.right() * self.rng.range(-1.0, 1.0) as f64 + u * self.rng.range(-1.0, 1.0) as f64) * (vibe * 0.03);
-            dir = (self.plane.pos + u * (1.2 * sz) + self.plane.forward() * (6.0 * sz) - cam).normalize();
-            upv = (u + self.plane.up() * 0.25).normalize();
+            dir = if steer_cam { (self.plane.pos + self.aim * (400.0 * sz) - cam).normalize() } else { (self.plane.pos + u * (1.2 * sz) + self.plane.forward() * (6.0 * sz) - cam).normalize() };
+            upv = (u + self.plane.up() * if steer_cam { 0.1 } else { 0.25 }).normalize();
             self.cam_pos = cam;
             self.cam_look = self.plane.pos;
         }
@@ -3830,6 +4334,11 @@ impl Game {
             self.world.car_instances(cam, cars::activity(local as f32), sun_up, &mut insts, &mut air_lights);
             self.n_cars = insts.len();
             self.destr.instances(cam, &mut insts, &mut fall);
+            {
+                // (others in the room firing their lasers)
+                let peers: Vec<(DVec3, DQuat, f32)> = self.mp.peers.iter().filter(|p| p.laser && !p.crashed && p.placed() && !p.is_boat()).map(|p| (p.pos, p.rot, aircraft::ALL[p.ac.min(aircraft::ALL.len() - 1)].span)).collect();
+                self.destroy.instances(cam, &mut insts, &mut air_lights, &peers, self.time);
+            }
             self.destr.skin_frame(cam);
             self.destr.upload_skins(&self.r);
             self.world.airport_instances(cam, self.wx.wind_from as f32, (self.wx.wind * 1.94384) as f32, self.time, &mut insts, &mut air_lights);
@@ -3852,7 +4361,7 @@ impl Game {
         // Multiplayer: our aircraft out (not from the globe), the others in.
         if self.mp.active() {
             let ac = if self.boat_mode { mp::boat_id() } else { aircraft::ALL.iter().position(|s| std::ptr::eq(*s, self.spec)).unwrap_or(0) } as u8;
-            let (plane, crashed, name) = (&self.plane, self.crashed, &self.mp_name);
+            let (plane, crashed, name, laser) = (&self.plane, self.crashed, &self.mp_name, self.destroy.firing);
             // (in the speedboat: the boat, once it is in the water)
             let boat = self.boat.as_ref().filter(|_| self.boat_mode);
             let waiting = self.boat_mode && boat.is_none();
@@ -3866,7 +4375,7 @@ impl Game {
                     None => (plane.pos, plane.rot, plane.vel, plane.gear as f32, plane.flaps as f32, plane.throttle as f32),
                 };
                 let (la, lo, al) = geo::pos_to_lla(pos);
-                Some(mp::State { name, ac, lat: la.to_degrees(), lon: lo.to_degrees(), alt: al, q: rot.as_quat().to_array(), vel: vel.as_vec3().to_array(), gear, flaps, thr, crashed: crashed && boat.is_none(), t })
+                Some(mp::State { name, ac, lat: la.to_degrees(), lon: lo.to_degrees(), alt: al, q: rot.as_quat().to_array(), vel: vel.as_vec3().to_array(), gear, flaps, thr, crashed: crashed && boat.is_none(), laser, t })
             });
             if !in_menu {
                 self.mp.draw(&mut self.mp_models, &mut self.r, cam, &mut objs, &mut insts, &mut air_lights);
@@ -4380,6 +4889,21 @@ impl Game {
                     egui::ScrollArea::vertical().max_height(right_h - 40.0).auto_shrink([false, true]).show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.spacing_mut().slider_width = 116.0;
+                        // The game mode: free flight, or Destruction (destroy.rs).
+                        menu::section(ui, "mode", t!("Mode", "Mode"), mode_name(self.destroy.mode), true, |ui| {
+                            ui.horizontal(|ui| {
+                                for m in destroy::GameMode::ALL {
+                                    if ui.add(egui::Button::selectable(self.destroy.mode == m, RichText::new(mode_name(m)).size(14.0)).min_size(egui::vec2(132.0, 30.0))).clicked() {
+                                        self.set_game_mode(m);
+                                    }
+                                }
+                            });
+                            let d = match self.destroy.mode {
+                                destroy::GameMode::Free => t!("Fly anywhere on Earth.", "Volez partout sur Terre."),
+                                destroy::GameMode::Destruction => t!("Lasers (left mouse), a meteor shower (2), a wrecking ball (1) and a death count. The mouse steers.", "Lasers (clic gauche), pluie de météores (2), boulet de démolition (1) et compteur de morts. La souris pilote."),
+                            };
+                            ui.label(RichText::new(d).size(12.0).color(DIM));
+                        });
                         let ground = self.menu.airport.is_some() && self.menu.start != menu::Start::Overhead;
                         let flight = if ground {
                             (if self.menu.start == menu::Start::Runway { t!("On the runway", "Sur la piste") } else { t!("Final approach", "Approche finale") }).to_string()
@@ -4710,6 +5234,21 @@ impl Game {
                             ui.label(t!("Mouse look speed", "Vitesse du regard (souris)"));
                             ui.add(egui::Slider::new(&mut self.look_sens, 0.25..=3.0).logarithmic(true).custom_formatter(|v, _| format!("{v:.2}×")));
                             ui.end_row();
+                            ui.label(t!("Mouse", "Souris"));
+                            ui.horizontal(|ui| {
+                                let st = self.mouse_steer.unwrap_or(self.destroy.on());
+                                if ui.selectable_label(!st, t!("Look around", "Regarder autour")).clicked() {
+                                    self.mouse_steer = Some(false);
+                                }
+                                if ui.selectable_label(st, t!("Steer", "Piloter")).clicked() {
+                                    self.mouse_steer = Some(true);
+                                }
+                                ui.label(RichText::new("3").size(12.0).color(DIM));
+                            });
+                            ui.end_row();
+                            ui.label(t!("Mouse steering speed", "Vitesse du pilotage souris"));
+                            ui.add(egui::Slider::new(&mut self.steer_sens, 0.25..=3.0).logarithmic(true).custom_formatter(|v, _| format!("{v:.2}×")));
+                            ui.end_row();
                             ui.label("HUD");
                             let t = if self.show_hud { t!("shown", "affiché") } else { t!("hidden", "masqué") };
                             ui.checkbox(&mut self.show_hud, t);
@@ -4776,6 +5315,36 @@ impl Game {
                             }
                             ui.label(RichText::new("[ / ]").size(12.0).color(DIM));
                         });
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(t!("Mode", "Mode")).size(14.0).color(TEXT));
+                            ui.add_space(8.0);
+                            for m in destroy::GameMode::ALL {
+                                if ui.add(egui::Button::selectable(self.destroy.mode == m, RichText::new(mode_name(m)).size(14.0)).min_size(egui::vec2(0.0, 26.0))).clicked() {
+                                    self.set_game_mode(m);
+                                }
+                            }
+                        });
+                        if self.destroying() {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(t!("Meteor shower", "Pluie de météores")).size(14.0).color(TEXT));
+                                ui.add_space(8.0);
+                                for r in 0..4u8 {
+                                    if ui.add(egui::Button::selectable(self.destroy.meteor_rate == r, RichText::new(destroy::Destroy::rate_name(r)).size(14.0)).min_size(egui::vec2(0.0, 26.0))).clicked() {
+                                        self.destroy.meteor_rate = r;
+                                    }
+                                }
+                                ui.label(RichText::new("2").size(12.0).color(DIM));
+                            });
+                            let mut on = self.destroy.ball_on;
+                            if ui.checkbox(&mut on, RichText::new(t!("Wrecking ball under the aircraft  (1)", "Boulet de démolition sous l'avion  (1)")).size(14.0)).changed() {
+                                if self.crashed || self.destroy.tally.dead_at.is_some() {
+                                    self.destroy.ball_on = on;
+                                } else {
+                                    self.hang_ball(on);
+                                }
+                            }
+                        }
                         ui.add_space(4.0);
                         if menu::wide_button(ui, t!("Back to the globe", "Retour au globe"), Hint::Text(t!("choose a new start", "choisir un nouveau départ")), false, true).clicked() {
                             *act = Some(PauseAct::Globe);
@@ -5271,7 +5840,8 @@ impl Game {
         let mut close_goto = false;
         let mut act = None;
         let stats = self.world.stats;
-        let airport_hud = self.airport_hud();
+        // (Destruction mode has its own panel there instead)
+        let airport_hud = self.airport_hud().filter(|_| !self.destroying());
         self.src.google.update_attribution(lat.to_degrees(), lon.to_degrees(), agl);
         self.flash.retain(|(_, t)| self.real - t < 4.0);
         let out = self.egui_ctx.clone().run_ui(raw, |root| {
@@ -5297,6 +5867,9 @@ impl Game {
             }
             let mut banner_bottom = 14.0;
             let mut info_r = egui::Rect::NOTHING;
+            if self.show_hud && !self.boat_mode {
+                self.aim_marks(ctx);
+            }
             if self.show_hud {
                 let hud_r = egui::Area::new(egui::Id::unique("hud")).anchor(Align2::LEFT_TOP, [14.0, 14.0]).show(ctx, |ui| {
                     panel.show(ui, |ui| {
@@ -5369,6 +5942,10 @@ impl Game {
                         }
                     });
                 }).response.rect;
+                if self.destroying() {
+                    let r = self.destroy_panel(ctx, hud_r.right() + 12.0);
+                    banner_bottom = r.bottom() + 8.0;
+                }
                 if let Some(lines) = &airport_hud {
                     // Right of the HUD panel (never over it), wrapping before the
                     // fps counter and the info panel on the right.
@@ -5824,6 +6401,10 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, el: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         let Some(g) = self.game.as_mut() else { return };
+        // (--headless runs are scripted: keys and clicks that find their window are not theirs)
+        if g.r.headless && matches!(event, WindowEvent::KeyboardInput { .. } | WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. }) {
+            return;
+        }
         let consumed = g.egui_state.on_window_event(&g.window, &event).consumed;
         match event {
             WindowEvent::CloseRequested => {
@@ -5844,7 +6425,14 @@ impl ApplicationHandler for App {
                     std::process::exit(0);
                 }
             }
-            WindowEvent::Focused(false) => g.keys.clear(),
+            WindowEvent::Focused(f) => {
+                g.focused = f;
+                if !f {
+                    g.keys.clear();
+                    g.fire_mouse = false;
+                    g.free_look = false;
+                }
+            }
             WindowEvent::KeyboardInput { event: k, .. } => {
                 if let PhysicalKey::Code(code) = k.physical_key {
                     if k.state == ElementState::Pressed {
@@ -5909,6 +6497,14 @@ impl ApplicationHandler for App {
                     }
                 }
             }
+            // Destruction mode: the left button fires.
+            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } if (!consumed || g.grabbed) && g.destroying() && !g.pause_open => {
+                g.fire_mouse = state == ElementState::Pressed;
+            }
+            // Steering with the mouse: the right button held looks round.
+            WindowEvent::MouseInput { state, button: MouseButton::Right, .. } if g.grabbed => {
+                g.free_look = state == ElementState::Pressed;
+            }
             WindowEvent::MouseInput { state, button: MouseButton::Left | MouseButton::Right, .. } if !consumed => {
                 g.drag = state == ElementState::Pressed;
                 g.last_cursor = None;
@@ -5919,7 +6515,7 @@ impl ApplicationHandler for App {
                         let h = g.window.inner_size().height.max(1) as f64;
                         g.menu.drag(position.x - x, position.y - y, h, 60f64.to_radians());
                     }
-                } else if g.drag && !g.pause_open {
+                } else if g.drag && !g.pause_open && !g.grabbed {
                     if let Some((x, y)) = g.last_cursor {
                         // Zoomed in, the view turns slower under the mouse.
                         let k = g.look_sens * if g.cam_mode == 1 { g.head.zoom } else { 1.0 };
@@ -5943,6 +6539,16 @@ impl ApplicationHandler for App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Raw mouse movement: steering with the mouse (the pointer is held, so
+    /// window positions stop moving).
+    fn device_event(&mut self, _: &ActiveEventLoop, _: winit::event::DeviceId, event: winit::event::DeviceEvent) {
+        if let (Some(g), winit::event::DeviceEvent::MouseMotion { delta }) = (self.game.as_mut(), event) {
+            if g.mode == Mode::Fly && !g.pause_open {
+                g.mouse_moved(delta.0, delta.1);
+            }
         }
     }
 

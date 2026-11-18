@@ -31,6 +31,13 @@ pub struct Settings {
     /// (empty: the game's own, `mp::MP_SERVER`)
     pub mp_name: String,
     pub mp_server: String,
+    /// the game mode last chosen on the start screen
+    pub mode: crate::destroy::GameMode,
+    /// the mouse steers the aircraft (mouse aim) rather than looking
+    /// around; None: as the mode has it (steering in Destruction)
+    pub mouse_steer: Option<bool>,
+    /// how fast the mouse moves the aim (1 = default)
+    pub steer_sens: f64,
 }
 
 /// The quality presets of the Graphics settings. Each sets every option of
@@ -247,7 +254,7 @@ impl Graphics {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { lang: None, sound_on: true, volume: 1.0, cam_mode: 0, cockpit_fov: crate::cockpit::FOV, look_sens: 1.0, show_hud: true, minimap: true, taa: true, live_traffic: true, live_weather: true, real_time: true, graphics: None, mp_name: String::new(), mp_server: String::new() }
+        Self { lang: None, sound_on: true, volume: 1.0, cam_mode: 0, cockpit_fov: crate::cockpit::FOV, look_sens: 1.0, show_hud: true, minimap: true, taa: true, live_traffic: true, live_weather: true, real_time: true, graphics: None, mp_name: String::new(), mp_server: String::new(), mode: crate::destroy::GameMode::Free, mouse_steer: None, steer_sens: 1.0 }
     }
 }
 
@@ -304,6 +311,13 @@ impl Settings {
             graphics: j["graphics"].is_object().then(|| Graphics::from_json(&j["graphics"])),
             mp_name: j["mp_name"].as_str().map(crate::mp::clean_name).unwrap_or_default(),
             mp_server: j["mp_server"].as_str().unwrap_or("").trim().to_string(),
+            mode: j["game_mode"].as_str().and_then(crate::destroy::GameMode::parse).unwrap_or(d.mode),
+            mouse_steer: match j["mouse"].as_str() {
+                Some("steer") => Some(true),
+                Some("look") => Some(false),
+                _ => None,
+            },
+            steer_sens: f("mouse_steer_speed", d.steer_sens).clamp(0.25, 3.0),
         }
     }
 
@@ -324,6 +338,9 @@ impl Settings {
             "graphics": self.graphics.map(|g| g.to_json()),
             "mp_name": self.mp_name,
             "mp_server": self.mp_server,
+            "game_mode": self.mode.code(),
+            "mouse": self.mouse_steer.map(|s| if s { "steer" } else { "look" }),
+            "mouse_steer_speed": self.steer_sens,
         })
     }
 
@@ -350,6 +367,9 @@ impl Settings {
             graphics: self.graphics,
             mp_name: kept_s(&self.mp_name, &start.mp_name, &saved.mp_name),
             mp_server: kept_s(&self.mp_server, &start.mp_server, &saved.mp_server),
+            mode: kept(self.mode, start.mode, saved.mode),
+            mouse_steer: kept(self.mouse_steer, start.mouse_steer, saved.mouse_steer),
+            steer_sens: kept(self.steer_sens, start.steer_sens, saved.steer_sens),
         }
     }
 
@@ -373,8 +393,12 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let s = Settings { lang: Some(Lang::Fr), sound_on: false, volume: 0.4, cam_mode: 1, cockpit_fov: 50.0, look_sens: 1.5, show_hud: false, minimap: false, taa: false, live_traffic: false, live_weather: false, real_time: false, graphics: None, mp_name: "Sam".into(), mp_server: "ws://127.0.0.1:8787".into() };
+        let s = Settings { lang: Some(Lang::Fr), sound_on: false, volume: 0.4, cam_mode: 1, cockpit_fov: 50.0, look_sens: 1.5, show_hud: false, minimap: false, taa: false, live_traffic: false, live_weather: false, real_time: false, graphics: None, mp_name: "Sam".into(), mp_server: "ws://127.0.0.1:8787".into(), mode: crate::destroy::GameMode::Destruction, mouse_steer: Some(true), steer_sens: 1.75 };
         assert_eq!(Settings::from_json(&s.to_json()), s);
+        for m in [None, Some(false), Some(true)] {
+            let t = Settings { mouse_steer: m, mode: crate::destroy::GameMode::Free, ..s.clone() };
+            assert_eq!(Settings::from_json(&t.to_json()), t);
+        }
         let g = Graphics { scale: 0.65, dyn_res: true, target_fps: 45, clouds: 0, shadows: 2, ao: false, bloom: true, terrain: 3, water: 0, msaa: true, upscaler: Upscaler::Fsr, vsync: false, fps_limit: 60, show_fps: true, fullscreen: true };
         let s = Settings { graphics: Some(g), ..s };
         assert_eq!(Settings::from_json(&s.to_json()), s);
@@ -390,6 +414,11 @@ mod tests {
         let j = serde_json::json!({ "volume": 7.0, "language": "xx" });
         let t = Settings::from_json(&j);
         assert_eq!((t.volume, t.lang, t.taa, t.minimap, t.graphics), (1.0, None, true, true, None));
+        assert_eq!((t.mode, t.mouse_steer, t.steer_sens), (crate::destroy::GameMode::Free, None, 1.0));
+        // (--mode for one run is not kept)
+        let saved = Settings::default();
+        let start = Settings { mode: crate::destroy::GameMode::Destruction, ..saved.clone() };
+        assert_eq!(start.keep_run(&start, &saved).mode, crate::destroy::GameMode::Free);
         // Saved before MSAA was an option: a preset stays that preset.
         let mut j = Graphics::preset(Preset::Medium, true).to_json();
         j.as_object_mut().unwrap().remove("msaa");

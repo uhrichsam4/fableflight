@@ -39,6 +39,14 @@ fn world(p: vec3f, w: f32, m0: vec4f, m1: vec4f, m2: vec4f) -> vec3f {
 @fragment fn fs(in: VOut) -> GOut {
   // Street traffic (ext.w = 1) gives way to the 3D tiles (tiles3d.rs).
   if (in.tint.a < 0.5 && in.ext.w > 0.5 && photo_hides(in.P, in.clip.xy)) { discard; }
+  // Light itself (destroy.rs: laser bolts, a meteor's white-hot front):
+  // tint.a 4, its colour the radiance, a little brighter seen face on.
+  if (in.tint.a > 3.5) {
+    let Vg = normalize(in.P);
+    let Ng = normalize(select(-Vg, in.N, dot(in.N, in.N) > 1e-10));
+    let core = 0.65 + 0.35 * abs(dot(Ng, Vg));
+    return GOut(vec4f(in.tint.rgb * core, 1.0), vec4f(-Vg, 0.0), 0.0);
+  }
   var N = in.N;
   if (dot(N, N) < 1e-10) { N = -normalize(in.P); }
   N = normalize(N);
@@ -76,6 +84,13 @@ fn world(p: vec3f, w: f32, m0: vec4f, m1: vec4f, m2: vec4f) -> vec3f {
       albedo = mix(vec3f(0.085, 0.052, 0.036), vec3f(0.16, 0.15, 0.14), 0.25 * n4.r) * (0.75 + 0.5 * n4.g);
     }
     c = shade(in.P, N, albedo);
+    // Rock glowing hot (tint.a 3, a meteor): molten through its cracks, and
+    // all over where it faces its flight (ext.x: how hot).
+    if (in.tint.a > 2.5) {
+      let n5 = textureSampleLevel(t_noise, s_repeat, in.L * 0.7 + 0.21, 0.0);
+      let crack = smoothstep(0.52, 0.7, n5.r) * (0.6 + 0.4 * n5.g);
+      c = c * 0.5 + vec3f(1.0, 0.33, 0.07) * (2.0 + 26.0 * crack) * in.ext.x;
+    }
     // The outer face of a piece of facade (local +y) is drawn as the building drew it.
     if (in.tint.a > 1.5 && m < 0.5 && in.Ln.y > 0.5 && in.ext.z != 0.0) {
       let st = u32(in.ext.w);
