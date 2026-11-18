@@ -22,6 +22,8 @@ const UPLOADS: usize = 3;
 const MAX_Z: u8 = 16;
 const MAGENTA: Color32 = Color32::from_rgb(255, 80, 230);
 const TRAFFIC: Color32 = Color32::from_rgb(150, 225, 255);
+/// the other players in a multiplayer room
+pub const PEER: Color32 = Color32::from_rgb(255, 150, 40);
 const APT: Color32 = Color32::from_rgb(110, 200, 255);
 
 /// A tile of one layer: 0 imagery, 1 place names.
@@ -218,6 +220,8 @@ pub struct Scene<'a> {
     pub traffic: Vec<(f64, f64, f64)>,
     /// the big ships (ships.rs): lat, lon, heading (degrees), length (m), name
     pub ships: Vec<(f64, f64, f64, f64, String)>,
+    /// the other players (multiplayer): lat, lon (degrees), heading (degrees), name
+    pub peers: Vec<(f64, f64, f64, String)>,
 }
 
 /// Airports near a view, looked up again only when it has moved or zoomed.
@@ -593,6 +597,18 @@ fn layers(painter: &egui::Painter, v: &View, s: &Scene, apts: &[u32], max_labels
         let pts = vec![p + f * l, p + f * (l * 0.45) + side * w, p - f * l + side * w * 0.8, p - f * l - side * w * 0.8, p + f * (l * 0.45) - side * w];
         painter.add(egui::Shape::convex_polygon(pts, Color32::from_rgb(235, 240, 245), Stroke::new(1.2, Color32::from_rgb(20, 60, 110))));
         text(p + vec2(0.0, l.min(30.0) + 4.0), Align2::CENTER_TOP, name, 11.0, Color32::from_rgb(200, 225, 255));
+    }
+    // the other players: orange arrows with their names
+    for (la, lo, h, name) in &s.peers {
+        let p = v.at(*la, *lo);
+        if !v.rect.contains(p) {
+            continue;
+        }
+        let f = v.dir(*h);
+        let side = vec2(-f.y, f.x);
+        let pts = vec![p + f * 9.0, p - f * 6.0 + side * 6.0, p - f * 3.0, p - f * 6.0 - side * 6.0];
+        painter.add(egui::Shape::convex_polygon(pts, PEER, Stroke::new(1.2, Color32::BLACK)));
+        text(p + vec2(10.0, -2.0), Align2::LEFT_BOTTOM, name, 12.0, PEER);
     }
     // the aircraft
     let p = v.at(s.lat, s.lon);

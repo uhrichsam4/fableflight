@@ -27,6 +27,7 @@ mod tiles3d;
 mod impostor;
 mod materials;
 mod minimap;
+mod mp;
 mod logo;
 mod menu;
 mod padui;
@@ -102,6 +103,8 @@ const SUN_E: f32 = 10.0;
 const SNOW_WRAP: f64 = 256.0 * std::f64::consts::TAU / 96.0;
 /// the route's course line and markers
 const MAGENTA: egui::Color32 = egui::Color32::from_rgb(255, 80, 230);
+/// The other players (name tags, the maps).
+const MP_ORANGE: egui::Color32 = minimap::PEER;
 /// The aircraft's own shadow map: half width (m), how far back toward the sun
 /// it starts, and how deep it reaches.
 const PSHADOW_R: f32 = 6.2;
@@ -299,6 +302,12 @@ struct Args {
     map_open: Option<f64>,
     /// --map-pick KSFO,KOAK: airports "clicked" on the large map as it opens (scripted screenshots)
     map_pick: Vec<String>,
+    /// multiplayer for this run: the relay's address, a room to join at once, the name shown
+    mp_server: Option<String>,
+    mp_join: Option<String>,
+    mp_name: Option<String>,
+    /// --mp-create: make a new room (a random code) and join it at once
+    mp_create: bool,
 }
 
 fn parse_args() -> Args {
@@ -353,6 +362,10 @@ fn parse_args() -> Args {
         pause_menu: None,
         map_open: None,
         map_pick: Vec::new(),
+        mp_server: None,
+        mp_join: None,
+        mp_name: None,
+        mp_create: false,
         route: None,
         sim_speed: 1,
         airport: None,
@@ -487,6 +500,13 @@ fn parse_args() -> Args {
             "--hold" => a.hold = num(&v, i).unwrap_or(0.0),
             "--damage" => a.damage = v.get(i + 1).cloned(),
             "--map-open" => a.map_open = num(&v, i),
+            "--mp-server" => a.mp_server = v.get(i + 1).cloned(),
+            "--mp-join" => a.mp_join = v.get(i + 1).map(|c| mp::clean_code(c)).filter(|c| c.len() >= 4),
+            "--mp-name" => a.mp_name = v.get(i + 1).map(|n| mp::clean_name(n)),
+            "--mp-create" => {
+                a.mp_create = true;
+                used = 1;
+            }
             "--map-pick" => a.map_pick = v.get(i + 1).map(|s| s.split(',').map(|c| c.trim().to_string()).collect()).unwrap_or_default(),
             "--pause-menu" => {
                 // page[@seconds]: open the flight panel (Tab) or the pause menu (Esc) on that page, for scripted screenshots
@@ -601,7 +621,7 @@ fn parse_args() -> Args {
                 used = 1;
             }
             "--help" | "-h" => {
-                println!("Samiam's Flight Sim\nfablegame [--menu | --no-menu] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--waves M] [--swell M,FROM_DEG] [--storm 0..1] [--snow 0..1] [--cloud-base M] [--weather] [--pause-menu flight|places|weather|game|route|settings|graphics|controls[@SECONDS]] [--map-open SECONDS [--map-pick KSFO,KOAK]] [--airport CODE [--runway 28L] [--approach]] [--ship carrier|megacarrier|titanic|megaship [--approach]] [--route KSFO,KOAK,...] [--sim-speed 1|2|4|8] [--max-zoom 8..19] [--cockpit] [--fov DEG] [--no-vsync] [--no-taa] [--render-scale 0.5..1] [--graphics low|medium|high|ultra[,scale=0.5..1,clouds=0..2,shadows=0..3,ao=0|1,bloom=0|1,terrain=0..3,water=low|high,msaa=0|1,dyn=0|1,target=FPS,upscaler=taau|fsr]] [--gpu-profile] [--fullscreen] [--mute] [--lang en|fr] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--boost-at SECONDS] [--damage rwing=4.3,laileron=0,rudder=0.5,prop=0.5,engine=0.4,oil=0.6,crack=1,nosegear=0,lsnap=3.4,rfold=3.2,tail=2.0]");
+                println!("Samiam's Flight Sim\nfablegame [--menu | --no-menu] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--waves M] [--swell M,FROM_DEG] [--storm 0..1] [--snow 0..1] [--cloud-base M] [--weather] [--pause-menu flight|places|weather|game|route|settings|graphics|controls|multiplayer[@SECONDS]] [--map-open SECONDS [--map-pick KSFO,KOAK]] [--mp-server ws(s)://HOST] [--mp-join CODE | --mp-create] [--mp-name NAME] [--airport CODE [--runway 28L] [--approach]] [--ship carrier|megacarrier|titanic|megaship [--approach]] [--route KSFO,KOAK,...] [--sim-speed 1|2|4|8] [--max-zoom 8..19] [--cockpit] [--fov DEG] [--no-vsync] [--no-taa] [--render-scale 0.5..1] [--graphics low|medium|high|ultra[,scale=0.5..1,clouds=0..2,shadows=0..3,ao=0|1,bloom=0|1,terrain=0..3,water=low|high,msaa=0|1,dyn=0|1,target=FPS,upscaler=taau|fsr]] [--gpu-profile] [--fullscreen] [--mute] [--lang en|fr] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--boost-at SECONDS] [--damage rwing=4.3,laileron=0,rudder=0.5,prop=0.5,engine=0.4,oil=0.6,crack=1,nosegear=0,lsnap=3.4,rfold=3.2,tail=2.0]");
                 std::process::exit(0);
             }
             other => {
@@ -857,6 +877,15 @@ struct Game {
     /// (view-projection, position) to put labels on it
     live: live::Live,
     live_view: Option<(Mat4, DVec3)>,
+    /// multiplayer: the room and the others in it, their aircraft models, the
+    /// name we fly under and the relay (as in the settings, or this run's
+    /// flags), the code typed to join, and the start screen's window for it
+    mp: mp::Mp,
+    mp_models: mp::Models,
+    mp_name: String,
+    mp_server: String,
+    mp_code: String,
+    mp_open: bool,
     /// real weather (sets `wx` while `wx.live` is on)
     livewx: livewx::LiveWx,
     /// waiting on the ground for the terrain to load: where, and until when at most
@@ -1047,6 +1076,12 @@ impl Game {
             prefs_t: 0.0,
             live: live::Live::new(prefs.live_traffic),
             live_view: None,
+            mp: mp::Mp::new(),
+            mp_models: mp::Models::default(),
+            mp_name: args.mp_name.clone().unwrap_or_else(|| prefs.mp_name.clone()),
+            mp_server: args.mp_server.clone().unwrap_or_else(|| prefs.mp_server.clone()),
+            mp_code: args.mp_join.clone().unwrap_or_default(),
+            mp_open: false,
             livewx: livewx::LiveWx::new(),
             prefs: prefs.clone(),
             // --route alone starts on the runway at its departure.
@@ -1066,6 +1101,14 @@ impl Game {
         if let Some(k) = args.ship.filter(|_| args.menu != Some(true)) {
             g.boat_seek = None;
             g.start_ship(k, lat.to_radians(), lon.to_radians(), g.ship_approach);
+        }
+        // Multiplayer from the command line: a room to join, or a new one.
+        let code = args.mp_join.clone().or_else(|| args.mp_create.then(mp::random_code));
+        if let Some(code) = code {
+            let server = g.mp_server_url();
+            println!("multiplayer: room {code} on {server}");
+            g.mp_code = code.clone();
+            g.mp.join(&server, &code);
         }
         // With --menu, an --airport is chosen on the globe rather than flown from.
         if args.menu == Some(true) {
@@ -2494,7 +2537,13 @@ impl Game {
 
     /// The settings worth keeping, as they are now.
     fn live_settings(&self) -> settings::Settings {
-        settings::Settings { lang: self.prefs_lang, sound_on: self.sound_on, volume: self.volume, cam_mode: self.cam_mode, cockpit_fov: self.cockpit_fov, look_sens: self.look_sens, show_hud: self.show_hud, minimap: self.map.mini_on, taa: self.taa, live_traffic: self.live.enabled(), live_weather: self.wx.live, real_time: self.wx.real_time, graphics: self.gfx_keep.map(|g| g.keep_run(&self.gfx0, &self.gfx_base)) }
+        settings::Settings { lang: self.prefs_lang, sound_on: self.sound_on, volume: self.volume, cam_mode: self.cam_mode, cockpit_fov: self.cockpit_fov, look_sens: self.look_sens, show_hud: self.show_hud, minimap: self.map.mini_on, taa: self.taa, live_traffic: self.live.enabled(), live_weather: self.wx.live, real_time: self.wx.real_time, graphics: self.gfx_keep.map(|g| g.keep_run(&self.gfx0, &self.gfx_base)), mp_name: self.mp_name.clone(), mp_server: self.mp_server.clone() }
+    }
+
+    /// The multiplayer relay in use: the one set, else the game's own.
+    fn mp_server_url(&self) -> String {
+        let s = self.mp_server.trim();
+        if s.is_empty() { mp::MP_SERVER.to_string() } else { s.to_string() }
     }
 
     /// Saves the settings when they have changed (looked at once a second,
@@ -3608,6 +3657,9 @@ impl Game {
         };
         if let Some(b) = self.boat.as_ref().filter(|_| self.boat_mode && !in_menu) {
             b.wake_rows(cam, &mut g.wake);
+        } else if self.mp.active() && !in_menu {
+            // (a friend's speedboat, then)
+            self.mp.wake_rows(cam, &mut g.wake);
         }
         if !in_menu && gpuprof::opt_on("ships") {
             g.wake[0][1] = self.fleet.wake_rows(cam, &mut g.ships) as f32;
@@ -3795,6 +3847,29 @@ impl Game {
             self.live.instances(cam, &mut insts, &mut air_lights);
             if let Some(b) = self.boat.as_ref().filter(|_| self.boat_mode) {
                 b.instances(cam, &mut insts);
+            }
+        }
+        // Multiplayer: our aircraft out (not from the globe), the others in.
+        if self.mp.active() {
+            let ac = if self.boat_mode { mp::boat_id() } else { aircraft::ALL.iter().position(|s| std::ptr::eq(*s, self.spec)).unwrap_or(0) } as u8;
+            let (plane, crashed, name) = (&self.plane, self.crashed, &self.mp_name);
+            // (in the speedboat: the boat, once it is in the water)
+            let boat = self.boat.as_ref().filter(|_| self.boat_mode);
+            let waiting = self.boat_mode && boat.is_none();
+            self.mp.step(|t| {
+                if in_menu || waiting {
+                    return None;
+                }
+                let name = if name.trim().is_empty() { "Pilot".to_string() } else { name.clone() };
+                let (pos, rot, vel, gear, flaps, thr) = match boat {
+                    Some(b) => (b.pos, b.rot, b.vel, 0.0, 0.0, b.throttle.abs().min(1.0) as f32),
+                    None => (plane.pos, plane.rot, plane.vel, plane.gear as f32, plane.flaps as f32, plane.throttle as f32),
+                };
+                let (la, lo, al) = geo::pos_to_lla(pos);
+                Some(mp::State { name, ac, lat: la.to_degrees(), lon: lo.to_degrees(), alt: al, q: rot.as_quat().to_array(), vel: vel.as_vec3().to_array(), gear, flaps, thr, crashed: crashed && boat.is_none(), t })
+            });
+            if !in_menu {
+                self.mp.draw(&mut self.mp_models, &mut self.r, cam, &mut objs, &mut insts, &mut air_lights);
             }
         }
         self.live_view = Some((vp, cam));
@@ -4201,11 +4276,21 @@ impl Game {
                         self.pad_home_focus(&take_off);
                     }
                     ui.add_space(6.0);
+                    let mp_hint = match &self.mp.room {
+                        Some(code) => format!("{code} · {}", self.mp.peers.len() + 1),
+                        None => String::new(),
+                    };
+                    if menu::wide_button(ui, t!("Multiplayer", "Multijoueur"), if mp_hint.is_empty() { Hint::None } else { Hint::Text(&mp_hint) }, false, true).clicked() {
+                        self.mp_open = !self.mp_open;
+                        self.menu.show_controls = false;
+                    }
+                    ui.add_space(6.0);
                     let mut home = None;
                     ui.columns(2, |c| {
                         let b = menu::wide_button(&mut c[0], t!("Settings", "Réglages"), Hint::of("", "View"), false, true);
                         if b.clicked() {
                             self.menu.show_controls = !self.menu.show_controls;
+                            self.mp_open = false;
                         }
                         home = Some(b);
                         if menu::wide_button(&mut c[1], t!("Quit", "Quitter"), Hint::of("Esc", ""), false, true).clicked() {
@@ -4253,6 +4338,31 @@ impl Game {
                                 ui.add_space(6.0);
                                 menu::controls_list(ui);
                             });
+                            padui::follow_focus(ui);
+                        });
+                    });
+                });
+            }
+
+            // Multiplayer, in a window over the globe like the settings.
+            if self.mp_open {
+                egui::Area::new(egui::Id::unique("menu_mp")).anchor(Align2::CENTER_CENTER, [0.0, 20.0]).show(ctx, |ui| {
+                    ui.set_max_height(screen.height() - 120.0);
+                    menu::panel().show(ui, |ui| {
+                        ui.set_width(460.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(t!("Multiplayer", "Multijoueur")).size(22.0).strong().color(Color32::WHITE));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.add(egui::Button::new(RichText::new(t!("Close", "Fermer")).size(13.0)).min_size(egui::vec2(64.0, 28.0))).clicked() {
+                                    self.mp_open = false;
+                                }
+                            });
+                        });
+                        ui.add_space(6.0);
+                        egui::ScrollArea::vertical().max_height(screen.height() - 220.0).show(ui, |ui| {
+                            self.mp_page(ui);
+                            ui.add_space(4.0);
+                            ui.label(RichText::new(t!("Pick a start and take off: the others see you once you fly. The room stays joined from the pause menu (Esc).", "Choisissez un départ et décollez : les autres vous voient une fois en vol. La salle reste ouverte depuis le menu pause (Échap).")).size(12.0).color(DIM));
                             padui::follow_focus(ui);
                         });
                     });
@@ -4526,6 +4636,7 @@ impl Game {
             Page::Controls => 640.0,
             Page::Graphics => 560.0,
             Page::Route => 520.0,
+            Page::Multiplayer => 460.0,
             _ => 420.0,
         };
         egui::Area::new(egui::Id::unique("pause")).order(egui::Order::Foreground).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
@@ -4635,6 +4746,10 @@ impl Game {
                         padui::follow_focus(ui);
                     }).inner,
                     Page::Controls => menu::controls_list(ui),
+                    Page::Multiplayer => egui::ScrollArea::vertical().max_height((screen.height() - 230.0).max(200.0)).show(ui, |ui| {
+                        self.mp_page(ui);
+                        padui::follow_focus(ui);
+                    }).inner,
                     Page::Route => egui::ScrollArea::vertical().max_height((screen.height() - 230.0).max(200.0)).show(ui, |ui| {
                         self.route_page(ui, act, lat, lon);
                         padui::follow_focus(ui);
@@ -4681,6 +4796,79 @@ impl Game {
                     ui.label(RichText::new(t!("Esc to resume  ·  Menu or B on a gamepad", "Échap pour reprendre  ·  Menu ou B à la manette")).size(12.0).color(DIM));
                 }
             });
+        });
+    }
+
+    /// Multiplayer (the pause menu's page, and the start screen's window):
+    /// the name to fly under, a room to create or join, who is in it.
+    fn mp_page(&mut self, ui: &mut egui::Ui) {
+        use egui::{Color32, RichText};
+        use menu::{ACCENT, DIM, TEXT};
+        ui.spacing_mut().item_spacing.y = 6.0;
+        menu::heading(ui, t!("YOUR NAME", "VOTRE NOM"));
+        ui.add(egui::TextEdit::singleline(&mut self.mp_name).char_limit(20).hint_text("Pilot").desired_width(240.0));
+        ui.add_space(6.0);
+        if let Some(code) = self.mp.room.clone() {
+            menu::heading(ui, t!("ROOM CODE", "CODE DE LA SALLE"));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&code).size(40.0).strong().monospace().color(ACCENT));
+                ui.add_space(10.0);
+                if ui.add(egui::Button::new(RichText::new(t!("Copy", "Copier")).size(14.0)).min_size(egui::vec2(70.0, 30.0))).clicked() {
+                    ui.ctx().copy_text(code.clone());
+                    self.status = t!("Room code {} copied", "Code {} copié", code);
+                    self.status_until = self.real + 3.0;
+                }
+            });
+            ui.label(RichText::new(t!("Your friends join with this code.", "Vos amis rejoignent avec ce code.")).size(12.0).color(DIM));
+            ui.add_space(4.0);
+            let col = match self.mp.net {
+                mp::Net::Connected => Color32::from_rgb(120, 230, 140),
+                mp::Net::Connecting => TEXT,
+                _ => Color32::from_rgb(255, 190, 60),
+            };
+            ui.label(RichText::new(self.mp.status()).size(13.5).color(col));
+            ui.add_space(4.0);
+            menu::heading(ui, t!("PLAYERS", "JOUEURS"));
+            let me = if self.mp_name.trim().is_empty() { "Pilot".to_string() } else { self.mp_name.trim().to_string() };
+            ui.label(RichText::new(t!("{}  (you)  ·  {}", "{}  (vous)  ·  {}", me, if self.boat_mode { boat::NAME } else { self.spec.name })).size(13.5).color(TEXT));
+            let here = self.plane.pos;
+            for p in &self.mp.peers {
+                let line = if p.placed() {
+                    let d = (p.pos - here).length();
+                    let what = if p.crashed { t!("crashed", "écrasé").to_string() } else { format!("{:.1} km", d / 1000.0) };
+                    format!("{}  ·  {}  ·  {what}", if p.name.is_empty() { "?" } else { &p.name }, mp::vehicle_name(p.ac))
+                } else {
+                    t!("player {} (on the globe)", "joueur {} (sur le globe)", p.id)
+                };
+                ui.label(RichText::new(line).size(13.5).color(MP_ORANGE));
+            }
+            ui.add_space(6.0);
+            if menu::wide_button(ui, t!("Leave the room", "Quitter la salle"), Hint::None, false, true).clicked() {
+                self.mp.leave();
+            }
+        } else {
+            let server = self.mp_server_url();
+            if menu::wide_button(ui, t!("Create a room", "Créer une salle"), Hint::Text(t!("a new code to share", "un nouveau code à partager")), true, true).clicked() {
+                self.mp_code = mp::random_code();
+                self.mp.join(&server, &self.mp_code);
+            }
+            ui.add_space(6.0);
+            menu::heading(ui, t!("JOIN A ROOM", "REJOINDRE UNE SALLE"));
+            ui.horizontal(|ui| {
+                let r = ui.add(egui::TextEdit::singleline(&mut self.mp_code).char_limit(mp::CODE_MAX).hint_text("ABCD").font(egui::TextStyle::Monospace).desired_width(120.0));
+                self.mp_code = mp::clean_code(&self.mp_code);
+                let ok = self.mp_code.len() >= 4;
+                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if ui.add_enabled(ok, egui::Button::new(RichText::new(t!("Join", "Rejoindre")).size(14.0)).min_size(egui::vec2(90.0, 28.0))).clicked() || (ok && enter) {
+                    self.mp.join(&server, &self.mp_code);
+                }
+            });
+            ui.label(RichText::new(t!("Type the code a friend created (4 to 8 letters or digits).", "Tapez le code créé par un ami (4 à 8 lettres ou chiffres).")).size(12.0).color(DIM));
+        }
+        ui.add_space(8.0);
+        ui.collapsing(RichText::new(t!("Server", "Serveur")).size(12.5).color(DIM), |ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.mp_server).hint_text(mp::MP_SERVER).desired_width(320.0));
+            ui.label(RichText::new(t!("Empty: the game's own. Changes apply to the next room joined.", "Vide : celui du jeu. S'applique à la prochaine salle rejointe.")).size(11.5).color(DIM));
         });
     }
 
@@ -5212,6 +5400,9 @@ impl Game {
                         if self.real < self.status_until && !self.status.is_empty() {
                             shadow(ui, self.status.chars().take(70).collect(), 13.0, white);
                         }
+                        if let Some(code) = &self.mp.room {
+                            shadow(ui, t!("Room {}  ·  {}", "Salle {}  ·  {}", code, self.mp.status()), 13.0, MP_ORANGE);
+                        }
                         shadow(ui, t!("{:.4}°{}  {:.4}°{}   {:02}:{:02} local", "{:.4}°{}  {:.4}°{}   {:02}:{:02} heure locale", lat.to_degrees().abs(), if lat >= 0.0 { 'N' } else { 'S' }, lon.to_degrees().abs(), if lon >= 0.0 { 'E' } else { 'W' }, local as u32, (local.fract() * 60.0) as u32), 13.0, dim);
                         if pad {
                             ui.horizontal(|ui| {
@@ -5336,6 +5527,42 @@ impl Game {
                     }
                 }
             }
+            // The other players: their name and how far, over their aircraft
+            // (an arrow at the edge of the screen when they are off it).
+            if let (true, Some((vp, cam))) = (self.show_hud && self.mp.active(), self.live_view) {
+                let screen = ctx.content_rect();
+                let painter = ctx.layer_painter(egui::LayerId::background());
+                for p in self.mp.peers.iter().filter(|p| p.placed()) {
+                    // (the tag sits a little above the aircraft, clear of it however big)
+                    let top = p.pos + p.pos.normalize() * mp::tag_height(p.ac);
+                    let d = (p.pos - self.plane.pos).length();
+                    let name = if p.name.is_empty() { "?" } else { p.name.as_str() };
+                    let label = if p.crashed { format!("{name}  ·  {}", t!("crashed", "écrasé")) } else if d < 10_000.0 { format!("{name}  ·  {:.0} m", d) } else { format!("{name}  ·  {:.0} km", d / 1000.0) };
+                    let c = vp * (top - cam).as_vec3().extend(1.0);
+                    let on = c.w > 0.0 && (c.x / c.w).abs() < 1.0 && (c.y / c.w).abs() < 1.0;
+                    if on {
+                        let at = egui::pos2(screen.left() + (c.x / c.w * 0.5 + 0.5) * screen.width(), screen.top() + (0.5 - c.y / c.w * 0.5) * screen.height());
+                        let font = FontId::proportional(14.0);
+                        painter.text(at + egui::vec2(1.0, -9.0), Align2::CENTER_BOTTOM, &label, font.clone(), Color32::from_black_alpha(170));
+                        painter.text(at + egui::vec2(0.0, -10.0), Align2::CENTER_BOTTOM, &label, font, MP_ORANGE);
+                        let pts = vec![at + egui::vec2(-5.0, -7.0), at + egui::vec2(5.0, -7.0), at];
+                        painter.add(egui::Shape::convex_polygon(pts, MP_ORANGE, egui::Stroke::new(1.0, Color32::from_black_alpha(170))));
+                    } else {
+                        let mut dir = egui::vec2(c.x, -c.y) * c.w.signum();
+                        if dir.length() < 1e-6 {
+                            dir = egui::vec2(0.0, 1.0);
+                        }
+                        let dir = dir.normalized();
+                        let mid = screen.center();
+                        let k = ((screen.width() * 0.5 - 40.0) / dir.x.abs().max(1e-4)).min((screen.height() * 0.5 - 40.0) / dir.y.abs().max(1e-4));
+                        let q = mid + dir * k;
+                        let side = egui::vec2(-dir.y, dir.x);
+                        painter.add(egui::Shape::convex_polygon(vec![q + dir * 10.0, q - dir * 6.0 + side * 8.0, q - dir * 6.0 - side * 8.0], MP_ORANGE, egui::Stroke::new(1.0, Color32::from_black_alpha(170))));
+                        let align = if dir.x > 0.5 { Align2::RIGHT_CENTER } else if dir.x < -0.5 { Align2::LEFT_CENTER } else if dir.y > 0.0 { Align2::CENTER_BOTTOM } else { Align2::CENTER_TOP };
+                        painter.text(q - dir * 16.0, align, &label, FontId::proportional(13.0), MP_ORANGE);
+                    }
+                }
+            }
             // Google's imagery has to carry its credit, HUD or not.
             let credits_r = if self.show_hud || self.google_shown() { self.credits(ctx) } else { egui::Rect::NOTHING };
             // The maps: the minimap in the lower-right corner, above the
@@ -5357,7 +5584,7 @@ impl Game {
                 } else {
                     Vec::new()
                 };
-                let scene = minimap::Scene { lat: lat.to_degrees(), lon: lon.to_degrees(), hdg: hdg_d, gs: gs_d, cruise: self.spec.cruise, agl, route: &self.route, traffic, ships: self.fleet.map_list() };
+                let scene = minimap::Scene { lat: lat.to_degrees(), lon: lon.to_degrees(), hdg: hdg_d, gs: gs_d, cruise: self.spec.cruise, agl, route: &self.route, traffic, ships: self.fleet.map_list(), peers: self.mp.map_list() };
                 if mini {
                     let screen = ctx.content_rect();
                     let bottom = if credits_r.is_positive() { credits_r.top() - 6.0 } else { screen.bottom() - 14.0 };

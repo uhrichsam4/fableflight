@@ -27,6 +27,10 @@ pub struct Settings {
     pub real_time: bool,
     /// None: never set, so the default preset for the GPU (`Graphics::default_for`)
     pub graphics: Option<Graphics>,
+    /// multiplayer: the name shown to the others, and the relay's address
+    /// (empty: the game's own, `mp::MP_SERVER`)
+    pub mp_name: String,
+    pub mp_server: String,
 }
 
 /// The quality presets of the Graphics settings. Each sets every option of
@@ -243,7 +247,7 @@ impl Graphics {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { lang: None, sound_on: true, volume: 1.0, cam_mode: 0, cockpit_fov: crate::cockpit::FOV, look_sens: 1.0, show_hud: true, minimap: true, taa: true, live_traffic: true, live_weather: true, real_time: true, graphics: None }
+        Self { lang: None, sound_on: true, volume: 1.0, cam_mode: 0, cockpit_fov: crate::cockpit::FOV, look_sens: 1.0, show_hud: true, minimap: true, taa: true, live_traffic: true, live_weather: true, real_time: true, graphics: None, mp_name: String::new(), mp_server: String::new() }
     }
 }
 
@@ -264,6 +268,11 @@ fn path() -> Option<PathBuf> {
 /// One field of `keep_run`: what the player changed since the start, else what was saved.
 fn kept<T: PartialEq + Copy>(cur: T, start: T, saved: T) -> T {
     if cur == start { saved } else { cur }
+}
+
+/// `kept` for text.
+fn kept_s(cur: &str, start: &str, saved: &str) -> String {
+    if cur == start { saved } else { cur }.to_string()
 }
 
 impl Settings {
@@ -293,6 +302,8 @@ impl Settings {
             live_weather: b("live_weather", d.live_weather),
             real_time: b("real_time", d.real_time),
             graphics: j["graphics"].is_object().then(|| Graphics::from_json(&j["graphics"])),
+            mp_name: j["mp_name"].as_str().map(crate::mp::clean_name).unwrap_or_default(),
+            mp_server: j["mp_server"].as_str().unwrap_or("").trim().to_string(),
         }
     }
 
@@ -311,6 +322,8 @@ impl Settings {
             "live_weather": self.live_weather,
             "real_time": self.real_time,
             "graphics": self.graphics.map(|g| g.to_json()),
+            "mp_name": self.mp_name,
+            "mp_server": self.mp_server,
         })
     }
 
@@ -335,6 +348,8 @@ impl Settings {
             // (merged by the caller with `Graphics::keep_run`: before any are
             // saved, the run starts from the GPU's default preset)
             graphics: self.graphics,
+            mp_name: kept_s(&self.mp_name, &start.mp_name, &saved.mp_name),
+            mp_server: kept_s(&self.mp_server, &start.mp_server, &saved.mp_server),
         }
     }
 
@@ -358,7 +373,7 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let s = Settings { lang: Some(Lang::Fr), sound_on: false, volume: 0.4, cam_mode: 1, cockpit_fov: 50.0, look_sens: 1.5, show_hud: false, minimap: false, taa: false, live_traffic: false, live_weather: false, real_time: false, graphics: None };
+        let s = Settings { lang: Some(Lang::Fr), sound_on: false, volume: 0.4, cam_mode: 1, cockpit_fov: 50.0, look_sens: 1.5, show_hud: false, minimap: false, taa: false, live_traffic: false, live_weather: false, real_time: false, graphics: None, mp_name: "Sam".into(), mp_server: "ws://127.0.0.1:8787".into() };
         assert_eq!(Settings::from_json(&s.to_json()), s);
         let g = Graphics { scale: 0.65, dyn_res: true, target_fps: 45, clouds: 0, shadows: 2, ao: false, bloom: true, terrain: 3, water: 0, msaa: true, upscaler: Upscaler::Fsr, vsync: false, fps_limit: 60, show_fps: true, fullscreen: true };
         let s = Settings { graphics: Some(g), ..s };
@@ -395,6 +410,12 @@ mod tests {
         let now = Settings { show_hud: false, ..start.clone() };
         let k = now.keep_run(&start, &saved);
         assert_eq!((k.taa, k.real_time, k.show_hud), (true, true, false));
+        // (--mp-name and --mp-server likewise; a name typed in the game is kept)
+        let start = Settings { mp_name: "B".into(), mp_server: "ws://127.0.0.1:8787".into(), ..saved.clone() };
+        let k = start.keep_run(&start, &saved);
+        assert_eq!((k.mp_name.as_str(), k.mp_server.as_str()), ("", ""));
+        let k = Settings { mp_name: "Ace".into(), ..start.clone() }.keep_run(&start, &saved);
+        assert_eq!((k.mp_name.as_str(), k.mp_server.as_str()), ("Ace", ""));
         let g0 = Graphics { vsync: true, ..g };
         let k = Graphics { clouds: 2, ..g0 }.keep_run(&g0, &g);
         assert_eq!((k.vsync, k.clouds), (false, 2));

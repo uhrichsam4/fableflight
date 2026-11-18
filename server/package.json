@@ -1,0 +1,13 @@
+{
+  "name": "fableflight-mp",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Multiplayer relay for Samiam's Flight Sim (Cloudflare Worker + Durable Objects)",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.163.0"
+  }
+}

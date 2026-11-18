@@ -115,6 +115,7 @@ fn fr(en: &str) -> Option<&'static str> {
         "Weather" => "Météo",
         "Game" => "Jeu",
         "Route" => "Itinéraire",
+        "Multiplayer" => "Multijoueur",
         "Settings" => "Réglages",
         "Graphics" => "Graphismes",
         "Controls" => "Commandes",

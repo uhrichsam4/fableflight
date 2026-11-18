@@ -244,11 +244,12 @@ pub enum Page {
     Settings,
     Graphics,
     Controls,
+    Multiplayer,
 }
 
 impl Page {
     pub const INFO: [Page; 3] = [Page::Flight, Page::Places, Page::Weather];
-    pub const PAUSE: [Page; 5] = [Page::Game, Page::Route, Page::Settings, Page::Graphics, Page::Controls];
+    pub const PAUSE: [Page; 6] = [Page::Game, Page::Multiplayer, Page::Route, Page::Settings, Page::Graphics, Page::Controls];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -260,6 +261,7 @@ impl Page {
             Page::Settings => "Settings",
             Page::Graphics => "Graphics",
             Page::Controls => "Controls",
+            Page::Multiplayer => "Multiplayer",
         }
     }
 
